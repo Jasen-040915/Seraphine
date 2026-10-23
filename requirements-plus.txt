@@ -1,0 +1,15 @@
+# Same application dependencies as 1.1.4, with a SIP wheel for Python 3.12.
+pyperclip==1.8.2
+PyQt5==5.15.11
+PyQt5-sip==12.17.0
+PyQt-Fluent-Widgets==1.5.7
+Requests==2.32.3
+aiohttp==3.10.10
+psutil==5.9.8
+qasync==0.27.1
+py7zr==0.21.0
+async-lru==2.0.4
+pywin32==312
+pyinstaller==6.22.3
+sherpa-onnx==1.13.8
+numpy==2.2.6

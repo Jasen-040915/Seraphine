@@ -1,0 +1,293 @@
+{
+  "source": "Local live match 2026-10-15; champion order and positions retained; player identities removed and equipment replaced.",
+  "snapshots": [
+    {
+      "gameData": {
+        "gameMode": "CLASSIC",
+        "gameTime": 133.6021728515625,
+        "mapName": "Map11",
+        "mapNumber": 11,
+        "mapTerrain": "Default"
+      },
+      "activePlayer": {
+        "riotId": "ORDER-Belveth"
+      },
+      "allPlayers": [
+        {
+          "riotId": "ORDER-Warwick",
+          "championName": "Warwick",
+          "rawChampionName": "game_character_displayname_Warwick",
+          "team": "ORDER",
+          "position": "TOP",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "ORDER-Belveth",
+          "championName": "Belveth",
+          "rawChampionName": "game_character_displayname_Belveth",
+          "team": "ORDER",
+          "position": "JUNGLE",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "ORDER-Locke",
+          "championName": "Locke",
+          "rawChampionName": "game_character_displayname_Locke",
+          "team": "ORDER",
+          "position": "MIDDLE",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "ORDER-Tristana",
+          "championName": "Tristana",
+          "rawChampionName": "game_character_displayname_Tristana",
+          "team": "ORDER",
+          "position": "BOTTOM",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "ORDER-Leona",
+          "championName": "Leona",
+          "rawChampionName": "game_character_displayname_Leona",
+          "team": "ORDER",
+          "position": "UTILITY",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Vladimir",
+          "championName": "Vladimir",
+          "rawChampionName": "game_character_displayname_Vladimir",
+          "team": "CHAOS",
+          "position": "TOP",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Ekko",
+          "championName": "Ekko",
+          "rawChampionName": "game_character_displayname_Ekko",
+          "team": "CHAOS",
+          "position": "JUNGLE",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Yasuo",
+          "championName": "Yasuo",
+          "rawChampionName": "game_character_displayname_Yasuo",
+          "team": "CHAOS",
+          "position": "MIDDLE",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Jinx",
+          "championName": "Jinx",
+          "rawChampionName": "game_character_displayname_Jinx",
+          "team": "CHAOS",
+          "position": "BOTTOM",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Rell",
+          "championName": "Rell",
+          "rawChampionName": "game_character_displayname_Rell",
+          "team": "CHAOS",
+          "position": "UTILITY",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "gameData": {
+        "gameMode": "CLASSIC",
+        "gameTime": 256.22113037109375,
+        "mapName": "Map11",
+        "mapNumber": 11,
+        "mapTerrain": "Default"
+      },
+      "activePlayer": {
+        "riotId": "ORDER-Belveth"
+      },
+      "allPlayers": [
+        {
+          "riotId": "ORDER-Warwick",
+          "championName": "Warwick",
+          "rawChampionName": "game_character_displayname_Warwick",
+          "team": "ORDER",
+          "position": "TOP",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "ORDER-Belveth",
+          "championName": "Belveth",
+          "rawChampionName": "game_character_displayname_Belveth",
+          "team": "ORDER",
+          "position": "JUNGLE",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "ORDER-Locke",
+          "championName": "Locke",
+          "rawChampionName": "game_character_displayname_Locke",
+          "team": "ORDER",
+          "position": "MIDDLE",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "ORDER-Leona",
+          "championName": "Leona",
+          "rawChampionName": "game_character_displayname_Leona",
+          "team": "ORDER",
+          "position": "UTILITY",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "ORDER-Tristana",
+          "championName": "Tristana",
+          "rawChampionName": "game_character_displayname_Tristana",
+          "team": "ORDER",
+          "position": "BOTTOM",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Vladimir",
+          "championName": "Vladimir",
+          "rawChampionName": "game_character_displayname_Vladimir",
+          "team": "CHAOS",
+          "position": "TOP",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Yasuo",
+          "championName": "Yasuo",
+          "rawChampionName": "game_character_displayname_Yasuo",
+          "team": "CHAOS",
+          "position": "MIDDLE",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Ekko",
+          "championName": "Ekko",
+          "rawChampionName": "game_character_displayname_Ekko",
+          "team": "CHAOS",
+          "position": "JUNGLE",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Jinx",
+          "championName": "Jinx",
+          "rawChampionName": "game_character_displayname_Jinx",
+          "team": "CHAOS",
+          "position": "BOTTOM",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "riotId": "CHAOS-Rell",
+          "championName": "Rell",
+          "rawChampionName": "game_character_displayname_Rell",
+          "team": "CHAOS",
+          "position": "UTILITY",
+          "items": [
+            {
+              "itemID": 1001,
+              "count": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,75 +1,38 @@
-name: Build Seraphine
+name: Test and build free Seraphine
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build-seraphine:
+  windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-plus.txt
       - name: Install dependencies
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.8'
-          cache: 'pip'
-      - name: Pack Seraphine
         run: |
-          pip install -r requirements.txt
-          pip install pyinstaller==5.13
-          .\make.ps1
-          echo "SUCCESS=true" >> $GITHUB_ENV
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        if: ${{ env.SUCCESS }} == 'true'
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install -r requirements-plus.txt
+      - name: Download verified speech model
+        run: .\.venv\Scripts\python.exe scripts\download_voice_model.py
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          APPDATA: ${{ runner.temp }}\SeraphineTest
+        run: .\.venv\Scripts\python.exe -m unittest discover -s tests
+      - name: Build Windows bundle
+        run: .\build-plus.ps1
+      - uses: actions/upload-artifact@v4
         with:
-          name: Seraphine
-          path: .\Seraphine.7z
-
-  release:
-    needs: build-seraphine
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    - name: Setup environment variables
-      run: |
-        export VERSION_CHANGED_COMMIT_HASH=$(git blame app/common/config.py --root -l | grep -Po "([\w]+) (?=\(.*\) VERSION = )")
-        export HEAD_COMMIT_HASH=$(git log -1 --format='%H')
-        export UPDATED=$(python -c "import os; UPDATED = 'true' if os.environ['HEAD_COMMIT_HASH'].strip() == os.environ['VERSION_CHANGED_COMMIT_HASH'].strip() else 'false'; print(UPDATED)")
-        export VERSION=$(cat app/common/config.py | grep -Po "(?<=VERSION = \")(.*[^\"])")
-        echo "VERSION=v$VERSION" >> $GITHUB_ENV
-        echo "UPDATED=$UPDATED" >> $GITHUB_ENV
-    - name: Download artifact
-      uses: actions/download-artifact@v4
-      if: env.UPDATED == 'true'
-      with:
-        name: Seraphine
-        path: ./
-    - name: Push to release
-      uses: ncipollo/release-action@v1
-      if: env.UPDATED == 'true'
-      with:
-        name: ${{ env.VERSION }}
-        tag: ${{ env.VERSION }}
-        token: ${{ secrets.GITHUB_TOKEN }}
-        replacesArtifacts: false
-        artifacts: Seraphine.7z
-    - name: Sync to Gitee
-      if: env.UPDATED == 'true'
-      env:
-        GITEE_OWNER: Zzaphkiel
-        GITEE_REPO: seraphine
-        GITEE_USERNAME: ${{ secrets.GITEE_USERNAME }}
-        GITEE_PASSWORD: ${{ secrets.GITEE_PASSWORD }}
-        GITEE_CLIENT_ID: ${{ secrets.GITEE_CLIENT_ID }}
-        GITEE_CLIENT_SECRET: ${{ secrets.GITEE_CLIENT_SECRET }}
-      run: |
-        python3 sync.py --tag "$VERSION"
+          name: Seraphine-free-windows-x64
+          path: dist/Seraphine/

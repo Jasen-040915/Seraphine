@@ -26,6 +26,7 @@ from app.view.search_interface import SearchInterface
 from app.view.game_info_interface import GameInfoInterface
 from app.view.auxiliary_interface import AuxiliaryInterface
 from app.view.opgg_window import OpggWindow
+from app.overlay.panels import OverlayController
 from app.common.util import (github, getLolClientPid, getTasklistPath,
                              getLolClientPidSlowly, getLoLPathByRegistry)
 from app.components.avatar_widget import NavigationAvatarWidget
@@ -34,6 +35,7 @@ from app.common.icons import Icon
 from app.common.config import cfg, VERSION, BETA
 from app.common.logger import logger
 from app.common.signals import signalBus
+from app.common.window_activation import restore_window, tray_opens_window
 from app.components.message_box import (UpdateMessageBox, NoticeMessageBox,
                                         WaitingForLolMessageBox, ExceptionMessageBox,
                                         ChangeDpiMessageBox)
@@ -62,8 +64,10 @@ class MainWindow(FluentWindow):
     checkUpdateFailed = pyqtSignal()
     fetchNoticeFailed = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, smoke_test=False):
         super().__init__()
+        self.smoke_test = smoke_test
+        self.startup_hide_timer = None
 
         logger.critical(f"Seraphine started, version: {BETA or VERSION}", TAG)
 
@@ -80,6 +84,10 @@ class MainWindow(FluentWindow):
         self.gameInfoInterface = GameInfoInterface(self)
         self.auxiliaryFuncInterface = AuxiliaryInterface(self)
         self.settingInterface = SettingInterface(self)
+        self.overlay = OverlayController(self, start_reader=not smoke_test)
+        from app.overlay.feature_pages import EconomyPage, VoicePage
+        self.economyInterface = EconomyPage(self.overlay, self)
+        self.voiceInterface = VoicePage(self.overlay.voice, self)
 
         logger.critical("Seraphine interfaces initialized", TAG)
 
@@ -105,9 +113,11 @@ class MainWindow(FluentWindow):
 
         self.__initInterface()
         self.__initNavigation()
-        self.__initListener()
+        if not smoke_test:
+            self.__initListener()
         self.__conncetSignalToSlot()
-        self.__autoStartLolClient()
+        if not smoke_test:
+            self.__autoStartLolClient()
 
         self.splashScreen.finish()
 
@@ -115,7 +125,8 @@ class MainWindow(FluentWindow):
 
         logger.critical("Seraphine initialized", TAG)
 
-        self.__silentStart()
+        if not smoke_test:
+            self.__silentStart()
 
     def __initConfig(self):
         folder = cfg.get(cfg.lolFolder)
@@ -162,6 +173,9 @@ class MainWindow(FluentWindow):
         self.addSubInterface(
             self.auxiliaryFuncInterface, Icon.WRENCH,
             self.tr("Auxiliary Functions"), pos)
+
+        self.addSubInterface(self.economyInterface, Icon.COINS, '装备经济', pos)
+        self.addSubInterface(self.voiceInterface, Icon.MICROPHONE, '语音输入', pos)
 
         pos = NavigationItemPosition.BOTTOM
 
@@ -230,6 +244,7 @@ class MainWindow(FluentWindow):
             self.__onCurrentSummonerProfileChanged)
         signalBus.gameStatusChanged.connect(
             self.__onGameStatusChanged)
+        signalBus.gameStatusChanged.connect(self.overlay.game_phase)
         signalBus.champSelectChanged.connect(
             self.__onChampSelectChanged)
         signalBus.lcuApiExceptionRaised.connect(
@@ -278,7 +293,8 @@ class MainWindow(FluentWindow):
         w, h = desktop.width(), desktop.height()
         self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)
 
-        self.show()
+        if not self.smoke_test:
+            self.show()
 
         QApplication.processEvents()
 
@@ -322,8 +338,7 @@ class MainWindow(FluentWindow):
         if hide:
             self.hide()
         else:
-            self.showNormal()
-            self.activateWindow()
+            self.activate_main_window()
 
     def checkUpdate(self):
         if not cfg.get(cfg.enableCheckUpdate):
@@ -418,7 +433,7 @@ class MainWindow(FluentWindow):
         quitAction = Action(Icon.EXIT, self.tr('Quit'), self)
 
         def showAndSwitch(interface):
-            self.show()
+            self.activate_main_window()
             self.checkAndSwitchTo(interface)
 
         def quit():
@@ -448,16 +463,20 @@ class MainWindow(FluentWindow):
         self.trayMenu.addAction(quitAction)
 
         self.trayIcon.setContextMenu(self.trayMenu)
-        # 双击事件
-        self.trayIcon.activated.connect(lambda reason: self.show(
-        ) if reason == QSystemTrayIcon.DoubleClick else None)
+        self.trayIcon.activated.connect(self.on_tray_activated)
         self.trayIcon.show()
 
     def show(self):
-        self.activateWindow()
-        self.setWindowState(self.windowState() & ~
-                            Qt.WindowMinimized | Qt.WindowActive)
-        self.showNormal()
+        restore_window(self)
+
+    def activate_main_window(self):
+        if self.startup_hide_timer is not None:
+            self.startup_hide_timer.stop()
+        restore_window(self)
+
+    def on_tray_activated(self, reason):
+        if tray_opens_window(reason):
+            self.activate_main_window()
 
     def __initListener(self):
         self.processListener.start()
@@ -741,6 +760,7 @@ class MainWindow(FluentWindow):
 
         if not cfg.get(cfg.enableCloseToTray) or self.isTrayExit:
             self.__terminateListeners()
+            self.overlay.stop()
             self.opggWindow.close()
 
             cfg.set(cfg.windowSize, self.windowSize)
@@ -754,7 +774,10 @@ class MainWindow(FluentWindow):
         if not cfg.get(cfg.enableSilent):
             return
 
-        QTimer.singleShot(0, self.hide)
+        self.startup_hide_timer = QTimer(self)
+        self.startup_hide_timer.setSingleShot(True)
+        self.startup_hide_timer.timeout.connect(self.hide)
+        self.startup_hide_timer.start(0)
 
     @asyncSlot(str)
     async def __switchToSearchInterface(self, name):

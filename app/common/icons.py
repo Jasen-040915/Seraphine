@@ -16,6 +16,8 @@ class Icon(FluentIconBase, Enum):
     ZOOMFIT = 'ZoomFit'
     LANGUAGE = 'Language'
     WRENCH = 'Wrench'
+    COINS = 'Coins'
+    MICROPHONE = 'Microphone'
     HOME = 'Home'
     SLIDESEARCH = 'SlideSearch'
     CHEVRONLEFT = "ChevronLeft"

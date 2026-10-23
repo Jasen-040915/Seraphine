@@ -2,6 +2,7 @@ from enum import Enum
 from copy import deepcopy
 import os
 import sys
+import shutil
 
 from PyQt5.QtCore import QLocale, QSize
 
@@ -237,11 +238,20 @@ class Config(QConfig):
 
 YEAR = 2023
 AUTHOR = "Zzaphkiel"
-VERSION = "1.1.4"
+VERSION = "1.1.4+free.1"
 BETA = None
-FEEDBACK_URL = "https://github.com/Zzaphkiel/Seraphine/issues?q=is%3Aissue"
-GITHUB_URL = "https://github.com/Zzaphkiel/Seraphine"
-LOCAL_PATH = f"{os.getenv('APPDATA')}\\Seraphine"
+FEEDBACK_URL = "https://github.com/Jasen-040915/Seraphine/issues"
+GITHUB_URL = "https://github.com/Jasen-040915/Seraphine"
+LOCAL_PATH = os.path.join(os.getenv('APPDATA', '.'), 'SeraphinePlus')
+
+# One-time copy; this build never writes the original installation's profile.
+os.makedirs(LOCAL_PATH, exist_ok=True)
+_profile_file = os.path.join(LOCAL_PATH, 'config.json')
+_original_profile = os.path.join(os.getenv('APPDATA', '.'), 'Seraphine', 'config.json')
+if not os.path.exists(_profile_file) and os.path.isfile(_original_profile):
+    shutil.copy2(_original_profile, _profile_file)
 
 cfg = Config()
 qconfig.load(f"{LOCAL_PATH}\\config.json", cfg)
+# The archived upstream cannot provide updates for this custom build.
+cfg.set(cfg.enableCheckUpdate, False)
