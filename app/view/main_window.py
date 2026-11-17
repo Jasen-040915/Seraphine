@@ -584,6 +584,7 @@ class MainWindow(FluentWindow):
     @asyncSlot()
     async def __onLolClientEnded(self):
         logger.critical("League of Legends client ended", TAG)
+        self.overlay.game_phase('None')
 
         if self.searchInterface.gameLoadingTask:
             self.searchInterface.puuid = 0
@@ -941,7 +942,9 @@ class MainWindow(FluentWindow):
 
     # 进入游戏后触发
     async def __onGameStart(self):
+        generation = self.overlay.game_generation
         session = await connector.getGameflowSession()
+        self.overlay.set_game_session(session, generation)
         currentSummonerId = self.currentSummoner['summonerId']
 
         queueId = session['gameData']['queue']['id']

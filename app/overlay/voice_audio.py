@@ -1,5 +1,6 @@
 """Local microphone capture and background SenseVoice decoding."""
 from pathlib import Path
+import os
 import queue
 import re
 import sys
@@ -78,9 +79,11 @@ def create_recognizer(directory=None):
     directory = Path(directory or model_directory())
     if not all((directory / name).is_file() for name in ('model.int8.onnx', 'tokens.txt')):
         raise RuntimeError('缺少语音模型，请保留程序目录中的 models 文件夹')
+    logical_cpus = os.cpu_count() or 4
+    threads = min(4, max(1, logical_cpus // 2))
     return sherpa_onnx.OfflineRecognizer.from_sense_voice(
         model=str(directory / 'model.int8.onnx'), tokens=str(directory / 'tokens.txt'),
-        num_threads=2, language='zh', use_itn=True, provider='cpu', debug=False)
+        num_threads=threads, language='zh', use_itn=True, provider='cpu', debug=False)
 
 
 def clean_transcript(text):

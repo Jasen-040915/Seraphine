@@ -1,13 +1,12 @@
 from qasync import asyncSlot
-import aiohttp
+import asyncio
 import os
-import shutil
 import sys
 import webbrowser
-import py7zr
+from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl
-from PyQt5.QtWidgets import (QPushButton, QVBoxLayout, QWidget, QLabel, QFileDialog,
+from PyQt5.QtWidgets import (QApplication, QPushButton, QVBoxLayout, QWidget, QLabel, QFileDialog,
                              QHBoxLayout)
 from PyQt5.QtGui import QFont, QPixmap
 
@@ -17,10 +16,11 @@ from app.common.qfluentwidgets import (MessageBoxBase, SmoothScrollArea,
                                        PipsScrollButtonDisplayMode, HorizontalPipsPager,
                                        FlyoutViewBase, PushButton)
 
-from app.common.config import VERSION, cfg, LOCAL_PATH, BETA
+from app.common.config import VERSION, cfg, BETA
 from app.common.util import getLolClientPidSlowly
 from app.common.signals import signalBus
-from app.common.update import runUpdater
+from app.common.update import runUpdater, prepare_update, github_proxy
+from app.common.logger import logger
 from app.lol.connector import connector
 from app.components.multi_champion_select import MultiChampionSelectWidget
 from app.components.multi_lol_path_setting import PathDraggableWidget
@@ -28,9 +28,13 @@ from app.components.champion_icon_widget import RoundedLabel
 
 
 class UpdateMessageBox(MessageBoxBase):
+    downloadProgress = pyqtSignal(int, int)
+
     def __init__(self, info, parent=None):
         super().__init__(parent=parent)
         self.info = info
+        self._updating = False
+        self.downloadProgress.connect(self.__onProgress)
 
         self.myYesButton = QPushButton(
             self.tr("Update and Restart"), self.buttonGroup)
@@ -62,12 +66,12 @@ class UpdateMessageBox(MessageBoxBase):
         self.titleLabel.setContentsMargins(5, 0, 5, 0)
 
         self.content.setText(self.tr("current: v") + (BETA or VERSION) + self.tr(", ")
-                             + self.tr("new: v") + self.info.get("tag_name")[1:])
+                             + self.tr("new: v") + self.info['version'])
         self.content.setContentsMargins(8, 0, 5, 0)
 
         self.textEdit.setFixedWidth(int(self.width() * .6))
         self.textEdit.setFixedHeight(int(self.height() * .4))
-        self.textEdit.setMarkdown(self.info.get("body"))
+        self.textEdit.setMarkdown(self.info.get('body') or '')
         self.textEdit.setReadOnly(True)
 
         self.infoLabel.setVisible(False)
@@ -78,7 +82,7 @@ class UpdateMessageBox(MessageBoxBase):
         self.myCancelButton.clicked.connect(self.__onCancelButtonClicked)
 
         # 简单判断下打开方式
-        if not os.path.exists("Seraphine.exe"):
+        if not getattr(sys, 'frozen', False):
             self.infoLabel.setVisible(True)
             self.infoLabel.setText(
                 self.tr("Updating is only available on releases version"))
@@ -97,23 +101,9 @@ class UpdateMessageBox(MessageBoxBase):
 
     @asyncSlot()
     async def __onYesButtonClicked(self):
-        '''
-        该函数负责
-        1. 删除 `LOCAL_PATH` 中之前可能下载过的文件
-        2. 重新下载新版本压缩包
-        3. 解压缩，并删除压缩包
-        4. 释放并运行 bat 文件，关闭自己
-        5. 删除当前文件夹下的自己，并将解压好的新版本拷贝进来
-        6. 重新运行自己
-        '''
-
-        # url = f"{github.proxyApi}/{self.info['assets'][0]['browser_download_url']}"
-
-        # 把下载地址换成 Gitee 的
-        url: str = self.info['assets'][0]['browser_download_url']
-        url = url.replace("github", "gitee")
-        url = url.replace("Zzaphkiel/Seraphine", "Zzaphkiel/seraphine")
-
+        if self._updating:
+            return
+        self._updating = True
         self.myYesButton.setEnabled(False)
         self.myCancelButton.setEnabled(False)
         self.manuallyButton.setEnabled(False)
@@ -121,55 +111,43 @@ class UpdateMessageBox(MessageBoxBase):
         self.infoLabel.setVisible(True)
         self.bar.setVisible(True)
 
-        zipPath = f'{LOCAL_PATH}/Seraphine.7z'
-        if os.path.exists(zipPath):
-            os.remove(zipPath)
-
-        dirPath = f'{LOCAL_PATH}/temp'
-        if os.path.exists(dirPath):
-            shutil.rmtree(dirPath, ignore_errors=True)
-
-        async with aiohttp.ClientSession() as sess:
-            resp = await sess.get(url)
-            length = int(resp.headers['content-length'])
-            self.bar.setMaximum(length)
-            cur = 0
-
-            with open(zipPath, 'wb') as f:
-                async for chunk in resp.content.iter_chunked(1024*1024):
-                    f.write(chunk)
-
-                    cur += len(chunk)
-                    self.bar.setValue(cur)
-                    self.infoLabel.setText(
-                        f"{cur / (1024*1024):.2f} MB / {length / (1024*1024):.2f} MB ({cur * 100 / length:.2f}%)")
-
-        self.infoLabel.setText(
-            self.tr("Downloading finished, decompressing..."))
-
-        with py7zr.SevenZipFile(zipPath, mode='r') as z:
-            z.extractall(dirPath)
-
-        os.remove(zipPath)
-        self.infoLabel.setText("Waiting for restart...")
-
-        # 覆盖自己
-        runUpdater()
-
-        # 关掉 QThread 之后退出
+        self.bar.setValue(0)
+        self.infoLabel.setText('正在下载更新…')
+        try:
+            installation = Path(sys.executable).resolve().parent
+            proxy = github_proxy(cfg.get(cfg.enableGithubProxy), cfg.get(cfg.githubProxyAddr))
+            workspace = await asyncio.to_thread(prepare_update, self.info, installation,
+                                                proxy, self.downloadProgress.emit)
+            self.infoLabel.setText('正在准备重启…')
+            await asyncio.to_thread(runUpdater, workspace, installation)
+        except Exception as error:
+            logger.error('Update failed: ' + type(error).__name__, 'Update')
+            self.infoLabel.setText('更新失败，请重试或手动下载。')
+            self._updating = False
+            self.myYesButton.setEnabled(True)
+            self.myCancelButton.setEnabled(True)
+            self.manuallyButton.setEnabled(True)
+            return
         signalBus.terminateListeners.emit()
-        sys.exit()
+        QApplication.instance().quit()
+
+    def __onProgress(self, received, total):
+        self.bar.setMaximum(total)
+        self.bar.setValue(received)
+        self.infoLabel.setText(f'{received / 1024 ** 2:.1f} / {total / 1024 ** 2:.1f} MB')
+        if received == total:
+            self.infoLabel.setText('正在校验并解压…')
+
+    def reject(self):
+        if not self._updating:
+            super().reject()
 
     def __onCancelButtonClicked(self):
         self.reject()
         self.rejected.emit()
 
     def __onManuallyButtonClicked(self):
-        url: str = self.info['assets'][0]['browser_download_url']
-        url = url.replace("github", "gitee")
-        url = url.replace("Zzaphkiel/Seraphine", "Zzaphkiel/seraphine")
-
-        webbrowser.open(url)
+        webbrowser.open(self.info['asset']['browser_download_url'])
 
         self.reject()
         self.rejected.emit()

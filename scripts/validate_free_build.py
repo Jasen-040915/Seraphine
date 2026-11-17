@@ -1,7 +1,7 @@
 """Verify a free Windows build, run isolated diagnostics, and include its source.
 
-Run after staging the intended public files with Git. The installation and real
-user profile are never changed by this script.
+Uses the tracked and non-ignored working source. The installation and real user
+profile are never changed by this script.
 """
 from __future__ import annotations
 import argparse
@@ -14,8 +14,10 @@ import re
 import subprocess
 import types
 import zipfile
+from xml.etree import ElementTree
 
 from PyInstaller.archive.readers import CArchiveReader
+from PyInstaller.utils.win32.winmanifest import read_manifest_from_executable
 import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -62,17 +64,29 @@ def main():
         if not source.is_file():
             continue
         matches[name] = canonical(compile(source.read_bytes(), str(source), 'exec', dont_inherit=True)) == canonical(pyz.extract(name))
-    for name, executable in (('main', 'Seraphine.exe'), ('keyboard_worker', 'SeraphineInput.exe')):
-        frozen = CArchiveReader(bundle / executable)
+    for name, executable, level in (
+        ('main', 'Seraphine.exe', 'requireAdministrator'),
+        ('keyboard_worker', 'SeraphineInput.exe', 'asInvoker'),
+    ):
+        path = bundle / executable
+        manifest = ElementTree.fromstring(read_manifest_from_executable(str(path)))
+        execution = manifest.find('.//{*}requestedExecutionLevel')
+        if execution is None or execution.get('level') != level or execution.get('uiAccess') != 'false':
+            raise ValueError(f'Unexpected Windows execution level in {executable}. Expected {level}.')
+        frozen = CArchiveReader(path)
         matches[name] = canonical(compile((ROOT / (name + '.py')).read_bytes(), name + '.py', 'exec', dont_inherit=True)) == canonical(marshal.loads(frozen.extract(name)))
     required = {'app.overlay.panels', 'app.overlay.voice', 'app.overlay.feature_pages', 'app.common.config', 'main', 'keyboard_worker'}
     if not required.issubset(matches) or not all(matches.values()):
         raise ValueError('Frozen source mismatch: ' + ', '.join(name for name, ok in matches.items() if not ok))
+    if (bundle / 'app/resource/updater.ps1').read_bytes() != (ROOT / 'app/resource/updater.ps1').read_bytes():
+        raise ValueError('Bundled updater differs from working source')
 
     git = ['git', '-c', 'safe.directory=' + ROOT.as_posix(), '-C', str(ROOT)]
-    sources = subprocess.check_output(git + ['ls-files', '-z']).decode('utf-8').strip('\0').split('\0')
+    sources = sorted(set(subprocess.check_output(git + [
+        'ls-files', '--cached', '--others', '--exclude-standard', '-z'
+    ]).decode('utf-8').strip('\0').split('\0')))
     if not sources or 'scripts/validate_free_build.py' not in sources:
-        raise ValueError('Stage the full intended public source first')
+        raise ValueError('Project source is unavailable')
     source_zip = bundle / 'Seraphine-source.zip'
     with zipfile.ZipFile(source_zip, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for name in sorted(sources):

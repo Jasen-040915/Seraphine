@@ -8,6 +8,7 @@ import unittest
 
 from app.common.qt_runtime import configure_qt_plugins
 configure_qt_plugins()
+from PyQt5.QtCore import QPoint
 from PyQt5.QtWidgets import QApplication
 from app.overlay.model import MatchState, player_id, scoreboard_data
 from app.overlay.panels import demo_payload, OverlayController
@@ -56,7 +57,9 @@ class ScoreboardRowTests(unittest.TestCase):
     def test_drag_hides_old_values_until_fresh_response_after_drop(self):
         self.rows.poll(self.state, self.keys, True)
         self.keys.held = {1}
-        self.rows.poll(self.state, self.keys, True)
+        self.rows.poll(self.state, self.keys, True, cursor=QPoint(100, 100))
+        self.assertTrue(self.state.scoreboard_order)
+        self.rows.poll(self.state, self.keys, True, cursor=QPoint(100, 120))
         self.assertEqual(self.state.scoreboard_order, {})
         self.keys.held = set()
         self.rows.poll(self.state, self.keys, True)

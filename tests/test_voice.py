@@ -221,6 +221,7 @@ class VoiceControllerTests(unittest.TestCase):
     def setUp(self):
         self.profile = tempfile.TemporaryDirectory()
         self.c = VoiceController(self.profile.name, Mock(), lambda: True, running=False)
+        self.c.settings['streaming'] = True
         self.c.bridge = FakeBridge()
         self.c.notify = Mock()
         self.c.audio.start = Mock(); self.c.audio.stop = Mock(return_value=(b'pcm', 16000)); self.c.audio.cancel = Mock()
@@ -589,6 +590,71 @@ class VoiceControllerTests(unittest.TestCase):
                 self.assertFilledText('中路小心')
                 self.assertFalse(self.c.gate.valid(ticket))
 
+    def feed_audio(self, pcm):
+        self.c.audio.chunks.append(pcm)
+        self.c.audio.size += len(pcm)
+        self.c.audio.activity.feed(pcm)
+
+    def test_default_dictation_prefetches_during_a_pause_and_fills_only_after_endpoint(self):
+        self.c.settings.pop('streaming', None)
+        self.enable_tick()
+        ticket = self.toggle()
+        self.c.worker.submit_partial = Mock(return_value=True)
+        voice = array('h', [2000] * 16000).tobytes()
+        self.feed_audio(voice)
+        self.feed_audio(bytes(8320))  # 260 ms of silence
+        self.c.tick()
+        self.c.worker.submit_partial.assert_not_called()
+
+        self.feed_audio(bytes(640))
+        self.c.tick()
+        self.c.tick()
+        self.c.worker.submit_partial.assert_called_once_with(ticket, voice + bytes(8960), 16000)
+        for _ in range(2):
+            self.c.partial_recognized(ticket, '中路小心', '')
+        self.scheduler.advance(150)
+        self.assertEqual(self.c.bridge.events, [])
+        self.c.worker.submit.assert_not_called()
+
+        self.feed_audio(bytes(10240))  # 600 ms of total silence
+        self.c.tick()
+        self.c.worker.submit.assert_called_once_with(ticket, b'pcm', 16000)
+        self.c.recognized(ticket, '中路小心。', '')
+        self.scheduler.advance(150)
+        self.assertFilledText('中路小心。')
+
+    def test_default_prefetch_checks_for_resumed_speech_before_submitting(self):
+        self.c.settings.pop('streaming', None)
+        self.enable_tick()
+        ticket = self.toggle()
+        self.c.worker.submit_partial = Mock(return_value=True)
+        voice = array('h', [2000] * 16000).tobytes()
+        quiet = bytes(8960)
+        resumed = voice[:640]
+        self.feed_audio(voice + quiet)
+
+        with patch.object(self.c.audio, 'device', Mock(readAll=Mock(return_value=resumed))):
+            self.c.tick()
+        self.c.worker.submit_partial.assert_not_called()
+
+        self.feed_audio(quiet)
+        self.c.tick()
+        self.c.worker.submit_partial.assert_called_once_with(ticket, voice + quiet + resumed + quiet, 16000)
+
+    def test_default_prefetch_does_not_queue_a_long_speculative_decode(self):
+        self.c.settings.pop('streaming', None)
+        self.enable_tick()
+        ticket = self.toggle()
+        self.c.worker.submit_partial = Mock()
+        self.feed_audio(array('h', [2000] * (9 * 16000)).tobytes())
+        self.feed_audio(bytes(8960))
+        self.c.tick()
+        self.c.worker.submit_partial.assert_not_called()
+
+        self.feed_audio(bytes(10240))
+        self.c.tick()
+        self.c.worker.submit.assert_called_once_with(ticket, b'pcm', 16000)
+
     def test_snapshot_submission_is_throttled_and_does_not_end_recording(self):
         self.enable_tick()
         ticket = self.toggle()
@@ -728,6 +794,7 @@ class VoiceStreamingIntegrationTests(unittest.TestCase):
         keys.foreground.return_value = True
         with tempfile.TemporaryDirectory() as profile:
             controller = VoiceController(profile, keys, lambda: True, running=False)
+            controller.settings['streaming'] = True
             controller.bridge = FakeBridge()
             controller.audio.start = Mock()  # never touch a microphone
             controller.audio.rate = rate
@@ -876,6 +943,7 @@ class VoiceSettingsTests(unittest.TestCase):
         self.dialog.test_audio.start = Mock()
         self.dialog.test_audio.cancel = Mock()
         self.dialog.show()
+        self.assertTrue(self.dialog.test_status.isHidden())
         self.dialog.toggle_test()
         self.dialog.test_audio.start.assert_called_once_with('USB 录音设备')
         self.assertTrue(self.dialog.test_timer.isActive())
@@ -884,6 +952,8 @@ class VoiceSettingsTests(unittest.TestCase):
         self.assertGreater(self.dialog.level.value(), 0)
         self.dialog.close()
         self.assertFalse(self.dialog.test_timer.isActive())
+        self.assertEqual(self.dialog.test_status.text(), '')
+        self.assertTrue(self.dialog.test_status.isHidden())
         self.dialog.test_audio.cancel.assert_called()
 
     def test_disconnected_device_error_does_not_change_saved_selection(self):
@@ -891,6 +961,7 @@ class VoiceSettingsTests(unittest.TestCase):
         self.dialog.test_audio.start = Mock(side_effect=RuntimeError('设备已断开'))
         self.dialog.toggle_test()
         self.assertEqual(self.dialog.test_status.text(), '设备已断开')
+        self.assertFalse(self.dialog.test_status.isHidden())
         self.assertFalse(self.dialog.test_timer.isActive())
         self.assertEqual(self.c.settings['microphone'], 'USB 录音设备')
 

@@ -10,9 +10,13 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
+import ssl
+import subprocess
 import sys
+import tempfile
 import zipfile
 
 
@@ -37,9 +41,13 @@ def sha(path: Path) -> str:
 
 def omit(path: PurePosixPath, *, source: bool = False) -> bool:
     dirs = SOURCE_OMIT_DIRS if source else OMIT_DIRS
+    # This public CA bundle is runtime data, not signing or merchant material.
+    # Keep the exception exact so private PEM files remain excluded everywhere.
+    runtime_ca_bundle = not source and path.as_posix().casefold() == 'certifi/cacert.pem'
     return (any(part.casefold() in dirs for part in path.parts)
             or path.name.casefold() in OMIT_NAMES
-            or path.suffix.casefold() in {'.log', '.pyc', '.pyo', '.dmp', '.pem', '.key', '.db', '.sqlite', '.sqlite3'}
+            or (path.suffix.casefold() == '.pem' and not runtime_ca_bundle)
+            or path.suffix.casefold() in {'.log', '.pyc', '.pyo', '.dmp', '.key', '.db', '.sqlite', '.sqlite3'}
             or '.sqlite' in path.name.casefold()
             or (path.name.casefold().startswith('.env.') and path.name.casefold() != '.env.example'))
 
@@ -63,7 +71,8 @@ def load_validated_build(version: str, validation: Path, bundle: Path) -> dict:
     if packaged.get('version') != version or not packaged.get('success'):
         raise ValueError('This version has not passed packaged self-tests')
     required = (
-        'python312.dll', 'base_library.zip', 'LICENSE',
+        'python312.dll', 'base_library.zip', 'LICENSE', 'certifi/cacert.pem',
+        'app/resource/updater.ps1',
         'models/sensevoice/model.int8.onnx', 'models/sensevoice/tokens.txt',
         'models/sensevoice/LICENSE', 'models/sensevoice/FunASR-MODEL-LICENSE.txt',
         'models/sensevoice/SenseVoice-LICENSE.txt',
@@ -163,6 +172,39 @@ def collect(bundle: Path) -> dict[str, Path | bytes]:
     return files
 
 
+def validate_extracted_archive(archive_path: Path, version: str) -> dict:
+    """Run the actual delivery after privacy filtering and extraction."""
+    with tempfile.TemporaryDirectory(prefix='seraphine-delivery-', dir=archive_path.parent) as name:
+        if Path(name).resolve().parent != archive_path.parent.resolve():
+            raise ValueError('Delivery test directory is outside the selected output folder')
+        destination = Path(name) / '解压 验证'
+        with zipfile.ZipFile(archive_path) as archive:
+            for item in archive.infolist():
+                relative = PurePosixPath(item.filename)
+                if relative.is_absolute() or '..' in relative.parts or relative.parts[0] != 'Seraphine':
+                    raise ValueError('Unexpected delivery archive path')
+            archive.extractall(destination)
+        bundle = destination / 'Seraphine'
+        # Catch missing or malformed CA data before spawning the windowed app.
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(str(bundle / 'certifi/cacert.pem'))
+        if not context.get_ca_certs():
+            raise ValueError('Delivery has an empty HTTPS CA bundle')
+        profile = Path(name) / 'isolated-profile'
+        environment = dict(os.environ, APPDATA=str(profile), QT_QPA_PLATFORM='offscreen')
+        process = subprocess.run([str(bundle / 'Seraphine.exe'), '--self-test-full', '--self-test-voice'],
+                                 cwd=destination, env=environment, timeout=240, capture_output=True)
+        result_path = profile / 'SeraphinePlus/self-test/result.json'
+        if process.returncode or not result_path.is_file():
+            raise ValueError('Extracted delivery did not start: ' + str(process.returncode))
+        result = json.loads(result_path.read_text(encoding='utf-8'))
+        failures = [key for key, value in result.items() if type(value) is bool and not value]
+        if failures or result.get('version') != version:
+            raise ValueError('Extracted delivery self-test failed: ' + ', '.join(failures))
+        return {'success': True, 'version': version, 'https_ca_certificates': len(context.get_ca_certs()),
+                'unicode_and_space_path': True, 'self_test': result}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', required=True)
@@ -213,8 +255,12 @@ def main() -> None:
     with zipfile.ZipFile(output) as archive:
         if archive.testzip() is not None:
             raise ValueError('Release archive failed CRC check')
+    delivery = validate_extracted_archive(output, args.version)
+    delivery_record = output.with_suffix('.validation.json')
+    delivery_record.write_text(json.dumps(delivery, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps({'version': args.version, 'files': len(files), 'bytes': output.stat().st_size,
-                      'sha256': sha(output), 'output': str(output)}, ensure_ascii=False))
+                      'sha256': sha(output), 'output': str(output),
+                      'extracted_delivery_tested': True}, ensure_ascii=False))
 
 
 if __name__ == '__main__':

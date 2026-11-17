@@ -9,13 +9,11 @@ import psutil
 import requests
 from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QRect, pyqtSignal
 from PyQt5.QtGui import QCursor
-from PyQt5.QtWidgets import (QApplication, QDialog, QLabel, QPushButton,
-                            QVBoxLayout, QHBoxLayout, QGridLayout, QCheckBox,
-                            QComboBox, QDoubleSpinBox, QMessageBox)
+from PyQt5.QtWidgets import QApplication, QDialog, QVBoxLayout, QGridLayout
 from app.common.qfluentwidgets import (PushButton as QPushButton, ComboBox as QComboBox,
                                       DoubleSpinBox as QDoubleSpinBox, BodyLabel)
 
-from .model import MatchState, player_id, scoreboard_data, economy_message, ROLE_NAMES, ROLES, normalized_role, clock_text
+from .model import MatchState, player_id, scoreboard_data, economy_message, ROLES, clock_text
 from .scoreboard import EconomyPanel, DEFAULT_ALIGNMENT
 from .rows import ScoreboardRows
 from .follow import ScoreboardFollow
@@ -177,6 +175,8 @@ class OverlayController(QObject):
                 self.settings = {}
         except (OSError, ValueError):
             self.settings = {}
+        self.settings.pop('auto_rows', None)
+        self.settings.pop('follow_scoreboard', None)
         # Older builds assumed our team was always on the left. The native
         # scoreboard keeps ORDER on the left even when we play on CHAOS.
         migrate_layout = self.settings.get('scoreboard_layout_version') is None
@@ -189,6 +189,8 @@ class OverlayController(QObject):
             self.settings['scoreboard'] = alignment
             self.settings['scoreboard_layout_version'] = 2
         self.catalog = json.loads(resource('overlay/catalog.json').read_text(encoding='utf-8-sig'))
+        self.game_generation = 0
+        self.is_custom_game = False
         self.state = MatchState()
         self.demo = MatchState()
         self.demo.update(demo_payload())
@@ -243,7 +245,7 @@ class OverlayController(QObject):
         if self.closed:
             return
         try:
-            if self.state.update(payload, self.settings.get('team') or None):
+            if self.state.update(payload, self.settings.get('team') or None, is_custom_game=self.is_custom_game):
                 self.rows.reset()
                 self.follow.reset(self.economy)
                 self.voice.reset_match()
@@ -258,9 +260,7 @@ class OverlayController(QObject):
         if not self.state.team:
             self.status = '已连接；未识别己方阵营，请在设置中手动选择'
         elif data.needs_pairing:
-            self.status = ('已连接 · ' + clock_text(self.state.game_time) +
-                           ('；按住 Tab 读取当前行顺序，数据不全的行显示「—」'
-                            if self.settings.get('auto_rows', True) else '；请设置本局五行英雄配对'))
+            self.status = '已连接 · ' + clock_text(self.state.game_time) + '；按住 Tab 读取当前行顺序，数据不全的行显示「—」'
         else:
             self.status = '已连接 · ' + clock_text(self.state.game_time) + '；按住 Tab 查看同行装备差'
 
@@ -273,8 +273,15 @@ class OverlayController(QObject):
         if invalidate:
             self.fresh_at = 0
 
+    def set_game_session(self, session, generation):
+        if (not self.closed and generation == self.game_generation
+                and session.get('phase') in ('GameStart', 'InProgress')):
+            self.is_custom_game = session.get('gameData', {}).get('isCustomGame') is True
+
     def game_phase(self, phase):
         if phase in ('None', 'Lobby', 'Matchmaking', 'ChampSelect', 'EndOfGame', 'PreEndOfGame'):
+            self.game_generation += 1
+            self.is_custom_game = False
             self.voice.reset_match()
             self.state.reset()
             self.rows.reset()
@@ -317,8 +324,7 @@ class OverlayController(QObject):
         pressed = held and not self.preview and self.keys.down(0x01) and not self.click_gate.pressed()
         cursor = getattr(self.keys, 'cursor', lambda: None)() if held and not self.preview else None
         moving_frame = self.follow.classify_drag(self.economy, pressed, cursor)
-        following = (held and self.viewport_available and not self.preview
-                     and self.settings.get('follow_scoreboard', True))
+        following = held and self.viewport_available and not self.preview
         self.follow.poll(self.economy, following, self.state.game_time, dragging=moving_frame)
         if self.follow.pending_classification:
             self.follow.classify_drag(self.economy, pressed, cursor)
@@ -326,37 +332,38 @@ class OverlayController(QObject):
         interval = 16 if following and moving_frame else 30
         if self.timer.interval() != interval:
             self.timer.setInterval(interval)
-        if self.rows.poll(self.state, self.keys,
-                          held and not self.preview and self.settings.get('auto_rows', True),
-                          moving_frame=moving_frame):
+        if self.rows.poll(self.state, self.keys, held and not self.preview,
+                          moving_frame=moving_frame, cursor=cursor):
             self.refresh_status()
-        positioned = (self.viewport_available and
-                      (not self.settings.get('follow_scoreboard', True) or self.follow.position_ready))
-        display_positioned = (self.viewport_available and
-                              (not self.settings.get('follow_scoreboard', True) or self.follow.display_ready))
+        positioned = self.viewport_available and self.follow.position_ready
+        display_positioned = self.viewport_available and self.follow.display_ready
         self.economy.setVisible(self.preview or held and display_positioned)
         self.economy.pass_through()
         self.render()
         share_enabled = active and not self.preview and self.settings.get('click_to_chat', True)
-        clickable = share_enabled and held and positioned
-        physical = (self.keys.physical_viewport()
-                    if share_enabled and (clickable or pending_click) and isinstance(self.keys, GameKeys) else None)
-        native_viewport_valid = not isinstance(self.keys, GameKeys) or physical is not None
-        same_click_viewport = (self.economy.geometry() == self.click_geometry
-                               and physical == self.click_physical_viewport)
-        clickable = (clickable and native_viewport_valid
-                     and (not pending_click or same_click_viewport))
-        zones = self.economy.click_zones(physical) if clickable else ()
-        if clickable:
-            self.click_geometry = QRect(self.economy.geometry())
-            self.click_physical_viewport = QRect(physical) if physical is not None else None
-        # A trusted mouse-down may finish after Tab is released. Keep only
-        # that snapshot alive; empty zones cannot accept a new mouse-down.
-        finish_click = (pending_click and not held and share_enabled and self.viewport_available
-                        and native_viewport_valid and same_click_viewport)
-        window = int(getattr(self.keys, 'last_window', 0) or 0) if clickable or finish_click else 0
-        ratio = physical.width() / self.economy.width() if physical is not None else 1
-        self.click_gate.context(window, zones, round(10 * ratio))
+        with self.click_gate.lock:
+            # The observer may have captured the press during the frame scan.
+            pending_click = self.click_gate.pressed()
+            clickable = share_enabled and held and positioned
+            physical = (self.keys.physical_viewport()
+                        if share_enabled and (clickable or pending_click) and isinstance(self.keys, GameKeys) else None)
+            native_viewport_valid = not isinstance(self.keys, GameKeys) or physical is not None
+            same_click_viewport = (self.economy.geometry() == self.click_geometry
+                                   and physical == self.click_physical_viewport)
+            clickable = (clickable and native_viewport_valid
+                         and (not pending_click or same_click_viewport))
+            zones = self.economy.click_zones(physical) if clickable else ()
+            if clickable:
+                self.click_geometry = QRect(self.economy.geometry())
+                self.click_physical_viewport = QRect(physical) if physical is not None else None
+            # Keep a confirmed mouse-down through Tab release or a brief missed
+            # scan while its badges are still shown. Empty zones block new clicks.
+            finish_click = (pending_click and (not held or display_positioned)
+                            and share_enabled and self.viewport_available
+                            and native_viewport_valid and same_click_viewport)
+            window = int(getattr(self.keys, 'last_window', 0) or 0) if clickable or finish_click else 0
+            ratio = physical.width() / self.economy.width() if physical is not None else 1
+            self.click_gate.context(window, zones, round(10 * ratio))
         if self.mouse_monitor.error and self.mouse_monitor.error != self.mouse_error:
             self.mouse_error = self.mouse_monitor.error
             self.status = self.mouse_error
@@ -403,7 +410,6 @@ class OverlaySettings(FeatureDialog):
     def __init__(self, controller):
         super().__init__(EconomyPage(controller), '萨勒芬妮 · 装备经济')
         self.controller = controller
-        self.auto_rows = self.page.auto_rows
         self.set_option = self.page.set_option
 
     def closeEvent(self, event):
@@ -416,7 +422,7 @@ class AlignmentDialog(QDialog):
     def __init__(self, controller, parent=None):
         super().__init__(parent)
         self.controller = controller
-        self.setWindowTitle('计分板位置与五行配对')
+        self.setWindowTitle('计分板位置')
         theme_dialog(self)
         self.setMinimumWidth(550)
         layout = QVBoxLayout(self)
@@ -448,34 +454,6 @@ class AlignmentDialog(QDialog):
         reset = QPushButton('恢复参考图的默认位置')
         reset.clicked.connect(lambda: [self.fields[k].setValue(DEFAULT_ALIGNMENT[k]) for k in self.fields])
         layout.addWidget(reset)
-        layout.addWidget(label('本局五行英雄：按原计分板从上到下选择', 14))
-        self.match = controller.state if controller.live() else controller.demo
-        self.signature = self.match.signature
-        self.selectors = {'ORDER': [], 'CHAOS': []}
-        pairs = QGridLayout()
-        pairs.addWidget(label('行'), 0, 0)
-        pairs.addWidget(label('蓝方 ORDER'), 0, 1)
-        pairs.addWidget(label('红方 CHAOS'), 0, 2)
-        for team_index, team in enumerate(self.selectors, start=1):
-            players = [p for p in self.match.players if p.get('team') == team]
-            by_role = {normalized_role(p.get('position')): p for p in players}
-            saved = self.match.scoreboard_order.get(team, [])
-            for row in range(5):
-                combo = QComboBox()
-                combo.addItem('请选择该行英雄', userData='')
-                for p in players:
-                    combo.addItem(p.get('championName', '未知英雄'), userData=player_id(p))
-                auto = saved[row] if row < len(saved) else player_id(by_role[ROLES[row]]) if ROLES[row] in by_role else ''
-                combo.setCurrentIndex(max(0, combo.findData(auto)))
-                pairs.addWidget(combo, row + 1, team_index)
-                self.selectors[team].append(combo)
-        for row in range(5):
-            pairs.addWidget(label(f'第 {row+1} 行'), row + 1, 0)
-        layout.addLayout(pairs)
-        layout.addWidget(label('自动模式直接跟随 Tab 行顺序。手动配对只用于本局，保存后会关闭自动跟随。', 11))
-        save_pairs = QPushButton('使用本局手动五行配对')
-        save_pairs.clicked.connect(self.save_pairs)
-        layout.addWidget(save_pairs)
         done = QPushButton('完成位置调整')
         done.clicked.connect(self.accept)
         layout.addWidget(done)
@@ -485,22 +463,3 @@ class AlignmentDialog(QDialog):
         settings[key] = value
         self.controller.economy.set_alignment(settings)
         self.controller.render()
-
-    def save_pairs(self):
-        if self.match.signature != self.signature:
-            QMessageBox.information(self, '对局已改变', '请关闭并重新打开配对设置。')
-            return
-        result = {team: [combo.currentData() for combo in combos] for team, combos in self.selectors.items()}
-        if any(not all(ids) or len(set(ids)) != 5 for ids in result.values()):
-            QMessageBox.information(self, '配对未完成', '每侧五行需选择五名不同英雄。')
-            return
-        self.match.scoreboard_order = result
-        if self.match is self.controller.state:
-            self.controller.settings['auto_rows'] = False
-            self.controller.rows.reset()
-            if self.controller.dialog:
-                self.controller.dialog.auto_rows.setChecked(False)
-            self.controller.save()
-            self.controller.refresh_status()
-        self.controller.render()
-        QMessageBox.information(self, '配对已保存', '已按所选五行计算差值。')

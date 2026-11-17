@@ -1,10 +1,11 @@
 param(
     [string]$OutputDirectory = 'dist',
-    [string]$BuildDirectory = 'build'
+    [string]$BuildDirectory = 'build',
+    [string]$BuildAliasPath = (Join-Path $env:LOCALAPPDATA 'SeraphinePlusBuild')
 )
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
-$aliasPath = Join-Path $env:LOCALAPPDATA 'SeraphinePlusBuild'
+$aliasPath = [IO.Path]::GetFullPath($BuildAliasPath)
 if (Test-Path -LiteralPath $aliasPath) {
     $aliasItem = Get-Item -LiteralPath $aliasPath
     if ($aliasItem.LinkType -ne 'Junction' -or $aliasItem.Target -ne $PSScriptRoot) {
@@ -20,7 +21,7 @@ $voiceModel = Join-Path $PSScriptRoot 'models\sensevoice'
 if (-not (Test-Path -LiteralPath (Join-Path $voiceModel 'model.int8.onnx'))) {
     throw 'Run .venv\Scripts\python.exe scripts\download_voice_model.py first'
 }
-& $python -m PyInstaller --noconfirm --windowed --name Seraphine --icon (Join-Path $aliasPath 'app/resource/images/logo.ico') --contents-directory . --distpath $taskOutput --workpath $taskWork --specpath $taskWork --add-data ((Join-Path $aliasPath 'app/resource') + ';app/resource') --add-data ((Join-Path $aliasPath 'LICENSE') + ';.') --collect-all sherpa_onnx --copy-metadata sherpa-onnx --copy-metadata sherpa-onnx-core --copy-metadata numpy (Join-Path $aliasPath 'main.py')
+& $python -m PyInstaller --noconfirm --windowed --uac-admin --name Seraphine --icon (Join-Path $aliasPath 'app/resource/images/logo.ico') --contents-directory . --distpath $taskOutput --workpath $taskWork --specpath $taskWork --add-data ((Join-Path $aliasPath 'app/resource') + ';app/resource') --add-data ((Join-Path $aliasPath 'LICENSE') + ';.') --collect-all sherpa_onnx --copy-metadata sherpa-onnx --copy-metadata sherpa-onnx-core --copy-metadata numpy (Join-Path $aliasPath 'main.py')
 if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 $taskInputOutput = Join-Path $taskWork 'input-dist'
 $taskInputWork = Join-Path $taskWork 'input-build'

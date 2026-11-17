@@ -73,6 +73,41 @@ class OverlayUITests(unittest.TestCase):
         c.tick()
         self.assertFalse(c.economy.isVisible())
 
+    def test_custom_scoreboard_compares_short_teams_and_paired_rows(self):
+        c = self.controller
+        payload = demo_payload()
+        players = payload['allPlayers']
+        payload['allPlayers'] = [players[0], players[1], players[5]]
+        payload['activePlayer'] = {'riotId': players[5]['riotId']}
+        c.set_game_session({'phase': 'InProgress', 'gameData': {'isCustomGame': True}}, c.game_generation)
+        self.keys.held = {9}
+        self.keys.last_window = 123
+        c.follow.capture = lambda _: QImage()
+        with patch('app.overlay.follow.find_scoreboard', return_value=BoardPosition(.5, REFERENCE_TOP, 1)):
+            c.receive(payload)
+            c.tick()
+
+        self.assertTrue(c.economy.isVisible())
+        data = c.economy.data
+        self.assertEqual((data.left_total, data.right_total, data.team_difference), (2700, 650, -2050))
+        self.assertEqual(data.differences, (-700, None, None, None, None))
+        self.assertEqual(data.names[:2], (('盖伦', '德莱厄斯'), ('盲僧', '')))
+        self.assertFalse(data.needs_pairing)
+        self.assertEqual([zone.row for zone in c.click_gate.zones], [-1, 0])
+
+    def test_game_phase_clears_custom_game_and_discards_late_session(self):
+        c = self.controller
+        session = {'phase': 'InProgress', 'gameData': {'isCustomGame': True}}
+        generation = c.game_generation
+        c.set_game_session(session, generation)
+        c.receive(demo_payload())
+        self.assertTrue(c.state.is_custom_game)
+
+        c.game_phase('EndOfGame')
+        c.set_game_session(session, generation)
+        c.receive(demo_payload())
+        self.assertFalse(c.state.is_custom_game)
+
     def test_no_spell_window_or_controls(self):
         c = self.controller
         self.assertFalse(hasattr(c, 'spells'))

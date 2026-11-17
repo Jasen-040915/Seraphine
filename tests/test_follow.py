@@ -15,12 +15,13 @@ from app.overlay.follow import find_scoreboard, BoardPosition, ScoreboardFollow,
 from app.overlay.panels import GameKeys, OverlayController, demo_payload
 
 
-def board_frame(width=1920, height=1080, dx=0, dy=0, sides=True, extra=None):
+def board_frame(width=1920, height=1080, dx=0, dy=0, sides=True, extra=None, width_scale=1):
     frame = QImage(width, height, QImage.Format_RGB32)
     frame.fill(QColor('#476744'))
     p = QPainter(frame)
     for center, top in [(width * (.5 + dx), height * (REFERENCE_TOP + dy)), *(extra or [])]:
-        left, right = center - height * 1.075 / 2, center + height * 1.075 / 2
+        half_width = height * 1.075 * width_scale / 2
+        left, right = center - half_width, center + half_width
         p.fillRect(QRectF(left, top, right - left, height * .43), QColor('#071b22'))
         if sides:
             p.setPen(QPen(QColor('#766a40'), max(2, height / 540)))
@@ -58,6 +59,14 @@ class ScoreboardFollowTests(unittest.TestCase):
                     self.assertIsNotNone(found)
                     self.assertAlmostEqual(found.center, .5 + dx, delta=.005)
                     self.assertAlmostEqual(found.top, REFERENCE_TOP + dy, delta=.005)
+
+    def test_locates_narrower_and_wider_native_frames(self):
+        for width_scale in (.90, .98, 1.02, 1.10):
+            with self.subTest(width_scale=width_scale):
+                found = find_scoreboard(board_frame(dx=.06, dy=.02, width_scale=width_scale))
+                self.assertIsNotNone(found)
+                self.assertAlmostEqual(found.center, .56, delta=.005)
+                self.assertAlmostEqual(found.top, REFERENCE_TOP + .02, delta=.005)
 
     def test_gold_line_without_both_scoreboard_sides_is_rejected(self):
         self.assertIsNone(find_scoreboard(board_frame(sides=False)))
@@ -269,7 +278,7 @@ class ScoreboardFollowTests(unittest.TestCase):
                 self.assertFalse(c.follow.position_ready)
                 self.assertFalse(c.economy.isVisible())
                 self.assertEqual((c.click_gate.window, c.click_gate.zones), (0, ()))
-                frames[0] = board_frame(1280, 720, dx=.08, dy=.12)
+                frames[0] = board_frame(1280, 720, dx=.08, dy=.12, width_scale=.96)
                 c.follow.next_read = 0; c.tick()
                 self.assertTrue(c.follow.position_ready)
                 self.assertTrue(c.economy.isVisible())
@@ -376,7 +385,7 @@ class ScoreboardFollowTests(unittest.TestCase):
             def physical_viewport(self): return self.native
 
         for change in ('focus', 'viewport_tab_released', 'viewport_tab_held',
-                       'dpi_tab_released', 'dpi_tab_held', 'frame_unconfirmed'):
+                       'dpi_tab_released', 'dpi_tab_held', 'frame_moved'):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as profile:
                 c = OverlayController(profile=profile, start_reader=False); c.timer.stop()
                 keys = NativeKeys(); keys.held = {9}; keys.last_window = 123; c.keys = keys
@@ -403,10 +412,43 @@ class ScoreboardFollowTests(unittest.TestCase):
                         if change == 'dpi_tab_released':
                             keys.held = set()
                     else:
-                        frames[0] = QImage(); c.follow.next_read = 0
+                        frames[0] = board_frame(1280, 720, dx=.08); c.follow.next_read = 0
                     c.tick()
                     self.assertEqual(c.click_gate.zones, ())
                     self.assertEqual(c.click_gate.mouse('up', point, 123, False), (True, None))
+                finally:
+                    c.stop()
+
+    def test_team_and_row_click_survive_ui_first_press_and_a_missed_scan(self):
+        for row in (-1, 2):
+            with self.subTest(row=row), tempfile.TemporaryDirectory() as profile:
+                c = OverlayController(profile=profile, start_reader=False)
+                c.timer.stop()
+                keys = Keys(); keys.held = {9}; keys.last_window = 123; c.keys = keys
+                c.economy.pass_through = lambda *_: None
+                frame = board_frame(1280, 720)
+                c.follow.capture = lambda _: frame
+                shares = []
+                c.mouse_monitor.dispatch = shares.append
+                try:
+                    c.receive(demo_payload()); c.tick()
+                    zone = next(z for z in c.click_gate.zones if z.row == row)
+                    x1, y1, x2, y2 = zone.bounds
+                    point = ((x1 + x2) // 2, (y1 + y2) // 2)
+                    c.mouse_monitor.read = lambda: (1 in keys.held, point, 123, True)
+                    c.mouse_monitor.poll_once()
+                    keys.point = QPoint(*point); keys.held = {9, 1}
+                    c.tick()
+                    c.mouse_monitor.poll_once()
+                    self.assertTrue(c.click_gate.pressed())
+                    frame = QImage(); c.follow.next_read = 0
+                    c.tick()
+                    self.assertTrue(c.economy.isVisible())
+                    self.assertFalse(c.follow.position_ready)
+                    self.assertEqual(c.click_gate.zones, ())
+                    keys.held = {9}
+                    c.mouse_monitor.poll_once()
+                    self.assertEqual(shares, [zone])
                 finally:
                     c.stop()
 
@@ -461,8 +503,13 @@ class ScoreboardFollowTests(unittest.TestCase):
             finally:
                 c.stop()
 
-    def test_capture_only_runs_for_live_foreground_tab_and_enabled_setting(self):
+    def test_legacy_disabled_follow_options_do_not_disable_tracking(self):
         with tempfile.TemporaryDirectory() as profile:
+            (Path(profile) / 'overlay.json').write_text(json.dumps({
+                'scoreboard_layout_version': 2,
+                'auto_rows': False,
+                'follow_scoreboard': False,
+            }), encoding='utf-8')
             c = OverlayController(profile=profile, start_reader=False)
             c.timer.stop()
             keys = Keys(); c.keys = keys
@@ -473,11 +520,14 @@ class ScoreboardFollowTests(unittest.TestCase):
                 c.receive(demo_payload())
                 c.tick(); self.assertEqual(calls, [])
                 keys.held = {9}; c.tick(); self.assertEqual(len(calls), 1)
+                self.assertTrue(c.follow.position_ready)
+                self.assertEqual(c.economy.data.names[1], ('盲僧', '赵信'))
                 keys.focused = False; c.tick(); self.assertEqual(len(calls), 1)
                 keys.focused = True; c.preview = True; c.tick(); self.assertEqual(len(calls), 1)
-                c.preview = False; c.settings['follow_scoreboard'] = False
+                c.preview = False; c.settings['enabled'] = False
                 c.tick(); self.assertEqual(len(calls), 1)
-                c.settings['follow_scoreboard'] = True; c.tick(); self.assertEqual(len(calls), 2)
+                self.assertFalse(c.economy.isVisible())
+                c.settings['enabled'] = True; c.tick(); self.assertEqual(len(calls), 2)
                 c.failed('disconnected', invalidate=True); c.tick(); self.assertEqual(len(calls), 2)
             finally:
                 c.stop()

@@ -40,10 +40,10 @@ class EconomyPanel(QWidget):
         for row, y in zip(range(-1, 5), [header, *rows]):
             message = economy_message(self.data, row)
             if message:
-                bounds = (round(native_viewport.x() + (x - 24 * scale) * sx),
+                bounds = (round(native_viewport.x() + (x - 16 * scale) * sx),
                           round(native_viewport.y() + (y - 9 * scale) * sy),
-                          round(native_viewport.x() + (x + 24 * scale) * sx),
-                          round(native_viewport.y() + (y + 24 * scale) * sy))
+                          round(native_viewport.x() + (x + 16 * scale) * sx),
+                          round(native_viewport.y() + (y + 9 * scale) * sy))
                 zones.append(ClickZone(bounds, row, message))
         return tuple(zones)
 

@@ -88,6 +88,10 @@ def economy_message(data, row=-1):
             f'{mine}{"领先" if own > 0 else "落后"}{theirs}{abs(own)}')
 
 
+def valid_team_size(size, is_custom_game):
+    return 1 <= size <= 5 if is_custom_game else size == 5
+
+
 def scoreboard_data(state, catalog, left_side='ORDER'):
     """Compare the two heroes in each observed/manual scoreboard row."""
     left_team = state.team if left_side == 'own' else left_side
@@ -97,16 +101,20 @@ def scoreboard_data(state, catalog, left_side='ORDER'):
     if left_team not in ('ORDER', 'CHAOS'):
         return ScoreboardData(None, None, (None,) * 5, (('', ''),) * 5, True)
     totals, ordered = [], []
+    needs_pairing = False
     for team in (left_team, right_team):
         players = [p for p in state.players if p.get('team') == team]
         values = [equipment_value(p.get('items'), catalog) for p in players]
-        totals.append(sum(values) if len(values) == 5 and all(v is not None for v in values) else None)
+        complete = valid_team_size(len(players), state.is_custom_game) and all(v is not None for v in values)
+        totals.append(sum(values) if complete else None)
         by_id = {player_id(p): p for p in players}
         rows = state.scoreboard_order.get(team, [])
         present = [pid for pid in rows if pid]
         valid = (len(rows) == 5 and len(set(present)) == len(present)
                  and all(pid in by_id for pid in present))
         ordered.append([by_id.get(pid) for pid in rows] if valid else [None] * 5)
+        expected = len(players) if state.is_custom_game else 5
+        needs_pairing |= not valid or len(present) != expected
     names, differences = [], []
     for index in range(5):
         left = ordered[0][index]
@@ -116,7 +124,6 @@ def scoreboard_data(state, catalog, left_side='ORDER'):
         rv = equipment_value(right.get('items'), catalog) if right else None
         differences.append(rv - lv if lv is not None and rv is not None else None)
     own_on_left = left_team == state.team if state.team in ('ORDER', 'CHAOS') else None
-    needs_pairing = any(player is None for side in ordered for player in side)
     return ScoreboardData(totals[0], totals[1], tuple(differences), tuple(names), needs_pairing, own_on_left)
 
 
@@ -136,8 +143,9 @@ class MatchState:
         self.signature = None
         self.mode = ''
         self.scoreboard_order = {}
+        self.is_custom_game = False
 
-    def update(self, payload, selected_team=None):
+    def update(self, payload, selected_team=None, *, is_custom_game=False):
         game_time = number(payload.get('gameData', {}).get('gameTime'))
         players = payload.get('allPlayers')
         if game_time is None or not isinstance(players, list) or not players or not all(isinstance(p, dict) for p in players):
@@ -153,6 +161,7 @@ class MatchState:
         self.game_time = game_time
         self.players = players
         self.mode = payload.get('gameData', {}).get('gameMode', '')
+        self.is_custom_game = is_custom_game
         active = payload.get('activePlayer', {})
         me = next((p for p in players if player_id(p) == player_id(active)
                    or (active.get('summonerName') and p.get('summonerName') == active.get('summonerName'))), None)

@@ -179,6 +179,7 @@ class Config(QConfig):
     enableCheckUpdate = ConfigItem("General",
                                    "EnableCheckUpdate", True,
                                    BoolValidator())
+    updateSetupVersion = ConfigItem("General", "UpdateSetupVersion", 0)
 
     logLevel = OptionsConfigItem(
         "General", "LogLevel", 40, OptionsValidator([10, 20, 30, 40]), restart=True)
@@ -238,7 +239,7 @@ class Config(QConfig):
 
 YEAR = 2023
 AUTHOR = "Zzaphkiel"
-VERSION = "1.1.4+free.1"
+VERSION = "1.1.4+free.8"
 BETA = None
 FEEDBACK_URL = "https://github.com/Jasen-040915/Seraphine/issues"
 GITHUB_URL = "https://github.com/Jasen-040915/Seraphine"
@@ -253,5 +254,8 @@ if not os.path.exists(_profile_file) and os.path.isfile(_original_profile):
 
 cfg = Config()
 qconfig.load(f"{LOCAL_PATH}\\config.json", cfg)
-# The archived upstream cannot provide updates for this custom build.
-cfg.set(cfg.enableCheckUpdate, False)
+# Earlier portable releases forcibly saved False on every start. Enable the
+# replacement once, then respect the user's setting on subsequent launches.
+if cfg.get(cfg.updateSetupVersion) < 1:
+    cfg.set(cfg.enableCheckUpdate, True)
+    cfg.set(cfg.updateSetupVersion, 1)

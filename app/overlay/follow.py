@@ -24,6 +24,19 @@ class BoardPosition:
     confidence: float
 
 
+def _border_peaks(scores):
+    supported = np.flatnonzero(scores >= .65)
+    if not len(supported):
+        return ()
+    runs = np.split(supported, np.flatnonzero(np.diff(supported) > 2) + 1)
+    peaks = []
+    for run in runs:
+        strength = float(scores[run].max())
+        strongest = run[scores[run] >= strength - .08]
+        peaks.append((float(strongest.mean()), strength))
+    return peaks
+
+
 def find_scoreboard(frame, hint=None):
     """Find the gold header border, verified by its dark fill and both sides."""
     if frame is None or frame.isNull() or frame.width() < 100 or frame.height() < 100:
@@ -33,7 +46,10 @@ def find_scoreboard(frame, hint=None):
     width, height, stride = frame.width(), frame.height(), frame.bytesPerLine()
     pixels = frame.constBits().asstring(frame.sizeInBytes())
     expected = height * 1.075
-    if expected > width:
+    min_width, max_width = expected * .90 - 5, expected * 1.10 + 5
+    inset = height * .018
+    min_span = min_width - 2 * inset
+    if min_width > width:
         return None
 
     # Calculate the same color predicates in native NumPy loops instead of
@@ -44,103 +60,49 @@ def find_scoreboard(frame, hint=None):
     dark_mask = (r < 58) & (g < 85) & (b < 100) & (b >= r - 5)
     side_mask = (r >= 25) & (g >= 22) & (r >= g - 25) & (g - b >= 4) & (r - b >= 5)
 
-    def side(x, y):
-        if not 0 <= x < width or not 0 <= y < height:
-            return False
-        return bool(side_mask[y, x])
-
-    def filled_side(x, y, inward):
-        inner = x + 2 * inward
-        return (side(x, y) and 0 <= inner < width
-                and bool(dark_mask[y, inner]))
-
     candidates = []
     first_y = max(0, round((hint.top - .1) * height)) if hint else 0
     last_y = min(height - round(height * .12), round((hint.top + .1) * height)) if hint else height - round(height * .12)
     counts = gold_mask[first_y:last_y, ::4].sum(axis=1)
-    for y in (np.flatnonzero(counts >= expected * .55 / 4) + first_y).tolist():
-        points = np.flatnonzero(gold_mask[y]).tolist()
-        spans = []
-        start = previous = points[0]
-        for x in points[1:]:
-            if x - previous > expected * .30:
-                spans.append((start, previous))
-                start = x
-            previous = x
-        spans.append((start, previous))
-        # Terrain can meet the gold predicate and bridge the whole scanline.
-        # Also consider pairs of substantial horizontal strokes, leaving the
-        # short scattered background pixels out of the proposed frame bounds.
-        strokes = np.split(np.asarray(points),
-                           np.flatnonzero(np.diff(points) > 2) + 1)
-        strokes = [(int(run[0]), int(run[-1])) for run in strokes
-                   if len(run) >= expected * .12]
-        for i, (left, _) in enumerate(strokes):
-            for _, right in strokes[i:]:
-                if expected * .85 <= right - left + 1 <= expected * 1.06:
-                    spans.append((left, right))
-        # One stroke endpoint can merge into terrain even when the opposite
-        # corner is clear. Propose the known header width from either endpoint
-        # and the last anchor, then apply the same pixel/side checks below.
-        header_width = expected - height * .036
-        centers = [width * REFERENCE_CENTER]
-        if hint:
-            centers.append(width * hint.center)
-        for left, right in strokes:
-            centers.extend((left + header_width / 2, right - header_width / 2))
-        spans.extend((round(center - header_width / 2), round(center + header_width / 2))
-                     for center in centers)
-        spans = list(dict.fromkeys(spans))
-        for left, right in spans:
-            if not 0 <= left < right < width:
-                continue
-            span = right - left + 1
-            if not expected * .85 <= span <= expected * 1.06:
-                continue
-            if int(gold_mask[y, left:right + 1:4].sum()) < expected * .55 / 4:
-                continue
-            inside_y = y + max(2, round(height * .008))
-            samples = dark_mask[inside_y, left + round(span * .04):right - round(span * .04):4]
-            inside = float(samples.mean()) if len(samples) else 0
-            if inside < .78:
-                continue
-            ys = range(y + round(height * .018), y + round(height * .10), 2)
-            if len(ys) < 10:
-                continue
-            # The top steps in at the corners; upright edges lie farther out.
-            center = (left + right) / 2
-            edges, sides = [], []
-            for guess, inward in ((center - expected / 2, 1), (center + expected / 2, -1)):
-                columns = [(x, sum(filled_side(x, yy, inward) for yy in ys) / len(ys))
-                           for x in range(round(guess) - 7, round(guess) + 8)]
-                peak = max(score for _, score in columns)
-                if peak < .65:
-                    break
-                # Anchor X to the upright borders, not the endpoints of a
-                # gold scanline that can merge with map highlights/cursors.
-                strongest = [x for x, score in columns if score >= max(.65, peak - .08)]
-                edges.append(sum(strongest) / len(strongest))
-                sides.append(peak)
-            if len(edges) != 2 or abs(edges[1] - edges[0] - expected) > 5:
-                continue
-            above = range(y - round(height * .05), y - round(height * .015), 2)
-            # A header/row separator has the same dark fill and sides as the
-            # top border, but its sides AND inner fill continue ABOVE it.
-            # Green terrain alone must not count as an upright frame border.
-            continuation = []
-            for x, inward in zip(edges, (1, -1)):
-                inside_x = round(x + inward * height * .015)
-                continuation.append(sum(
-                    0 <= yy < height and 0 <= inside_x < width
-                    and dark_mask[yy, inside_x]
-                    and any(side(round(x) + dx, yy) for dx in (-1, 0, 1))
-                    for yy in above) / max(1, len(above)))
-            if min(continuation) >= .6:
-                continue
-            confidence = .6 * min(sides) + .4 * inside
-            if confidence < .82:
-                continue
-            candidates.append((confidence, edges[0], edges[1], y))
+    for y in (np.flatnonzero(counts >= min_span * .55 / 4) + first_y).tolist():
+        side_rows = slice(y + round(height * .018), y + round(height * .10), 2)
+        borders, fill = side_mask[side_rows], dark_mask[side_rows]
+        if len(borders) < 10:
+            continue
+        left_scores, right_scores = np.zeros(width), np.zeros(width)
+        left_scores[:-2] = (borders[:, :-2] & fill[:, 2:]).mean(axis=0)
+        right_scores[2:] = (borders[:, 2:] & fill[:, :-2]).mean(axis=0)
+
+        # Pair the measured upright borders, then look for gold between the
+        # inset corners. Gold terrain can extend past either end of the header.
+        right_edges = _border_peaks(right_scores)
+        for left, left_strength in _border_peaks(left_scores):
+            for right, right_strength in right_edges:
+                if not min_width <= right - left <= max_width:
+                    continue
+                start, end = round(left + inset), round(right - inset) + 1
+                span = end - start
+                gold = gold_mask[y, start:end]
+                corner = round(span * .1)
+                if gold.mean() < .55 or not (gold[:corner].any() and gold[-corner:].any()):
+                    continue
+                inside_y = y + max(2, round(height * .008))
+                margin = round(span * .04)
+                inside = float(dark_mask[inside_y, start + margin:end - margin:4].mean())
+                confidence = .6 * min(left_strength, right_strength) + .4 * inside
+                if inside < .78 or confidence < .82:
+                    continue
+                # A row separator can pass the gold and dark checks, but its
+                # sides and inner fill continue above it.
+                above = slice(max(0, y - round(height * .05)), max(0, y - round(height * .015)), 2)
+                continuation = []
+                for edge, inward in ((left, 1), (right, -1)):
+                    x = round(edge)
+                    inner = round(edge + inward * height * .015)
+                    outer = side_mask[above, max(0, x - 1):x + 2].any(axis=1)
+                    continuation.append((outer & dark_mask[above, inner]).sum() / max(1, len(outer)))
+                if min(continuation) < .6:
+                    candidates.append((confidence, left, right, y))
     if not candidates:
         return None
     candidates.sort(reverse=True)

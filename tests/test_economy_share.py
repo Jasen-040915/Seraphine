@@ -269,7 +269,14 @@ class DifferenceTargetsTests(unittest.TestCase):
         zones = self.panel.click_zones()
         self.assertTrue(self.panel.testAttribute(Qt.WA_TransparentForMouseEvents))
         self.assertEqual([z.row for z in zones], [-1, 0, 1, 2, 4])
-        self.assertTrue(all(z.bounds[2] - z.bounds[0] <= 50 for z in zones))
+        self.assertTrue(all(z.bounds[2] - z.bounds[0] == 32 for z in zones))
+        self.assertTrue(all(z.bounds[3] - z.bounds[1] == 18 for z in zones))
+        for z in zones:
+            left, top, right, bottom = z.bounds
+            self.assertTrue(z.contains(((left + right) // 2, top + 8)))
+            self.assertFalse(z.contains((left - 4, top + 8)))
+            self.assertFalse(z.contains((right + 4, top + 8)))
+            self.assertFalse(z.contains(((left + right) // 2, bottom + 1)))
         self.assertFalse(hasattr(self.panel, 'targets'))
 
     def test_preview_does_not_publish_click_regions(self):
@@ -285,8 +292,8 @@ class DifferenceTargetsTests(unittest.TestCase):
         self.assertEqual(after[1] - before[1], 108)
         self.panel.set_follow_offset(QPointF())
         physical = self.panel.click_zones(QRect(-2880, 100, 2880, 1620))[0].bounds
-        self.assertEqual(physical[2] - physical[0], 72)
-        self.assertEqual(physical[0], -2880 + round((960 - 24) * 1.5))
+        self.assertEqual(physical[2] - physical[0], 48)
+        self.assertEqual(physical[0], -2880 + round((960 - 16) * 1.5))
         self.assertEqual(physical[1], 100 + round((1080 * .217 - 9) * 1.5))
 
     def test_controller_blocks_preview_stale_data_and_disabled_sharing(self):

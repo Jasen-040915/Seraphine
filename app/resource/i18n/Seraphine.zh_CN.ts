@@ -3520,7 +3520,7 @@ when they are used by Seraphine, which will cost more time</source>
     <message>
         <location filename="../../components/message_box.py" line="35"/>
         <source>Update and Restart</source>
-        <translation>自动下载安装（可能被拦截）</translation>
+        <translation>更新并重启</translation>
     </message>
     <message>
         <location filename="../../components/message_box.py" line="83"/>
@@ -3535,7 +3535,7 @@ when they are used by Seraphine, which will cost more time</source>
     <message>
         <location filename="../../components/message_box.py" line="38"/>
         <source>Manually Download</source>
-        <translation>转到浏览器手动下载 🤩</translation>
+        <translation>手动下载</translation>
     </message>
 </context>
 <context>

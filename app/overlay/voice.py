@@ -19,6 +19,7 @@ class VoiceController(QObject):
     EARLY_PARTIAL_SECONDS = .25
     ONGOING_PARTIAL_SECONDS = .65
     ENDING_PARTIAL_SECONDS = .28
+    MAX_ENDING_PREFETCH_SECONDS = 8
 
     def __init__(self, profile, keys, live, parent=None, running=True):
         super().__init__(parent)
@@ -107,7 +108,6 @@ class VoiceController(QObject):
 
     def notify(self, text, seconds=0, phase=None):
         self.status = text
-        # All feedback lives in settings; dictation never opens an in-game HUD.
 
     def tick(self):
         if self.closed:
@@ -135,25 +135,31 @@ class VoiceController(QObject):
                 self.gate.cancel(manual=True)
                 self.notify('没有听到声音，聊天框仍可手动输入', 4)
             elif self.audio.activity.heard_voice:
-                # Short snapshots reduce the first-word wait. Once text is
-                # visible, ease back to avoid repeatedly decoding long audio.
-                interval = self.ONGOING_PARTIAL_SECONDS if self.transcript.committed else self.EARLY_PARTIAL_SECONDS
-                first_size = round(self.audio.rate * self.FIRST_PARTIAL_SECONDS) * 2
-                threshold = max(first_size,
-                                self.last_partial_size + round(self.audio.rate * interval) * 2)
-                quiet_threshold = round(self.audio.rate * self.ENDING_PARTIAL_SECONDS)
-                ending = (self.audio.activity.quiet >= quiet_threshold
-                          and self.last_ending_voiced != self.audio.activity.voiced)
-                if self.audio.size >= threshold or ending and self.audio.size >= first_size:
-                    pcm, rate = self.audio.snapshot()
-                    if self.worker.submit_partial(self.gate.ticket, pcm, rate):
-                        self.last_partial_size = len(pcm)
-                        # snapshot() drains newly arrived microphone frames.
-                        # Recheck in case speech resumed during that drain.
-                        if self.audio.activity.quiet >= quiet_threshold:
-                            self.last_ending_voiced = self.audio.activity.voiced
-        if self.dialog is not None and self.dialog.isVisible():
-            self.dialog.status.setText(self.status)
+                self.prefetch_recognition(self.gate.ticket)
+
+    def prefetch_recognition(self, ticket):
+        activity, rate = self.audio.activity, self.audio.rate
+        quiet_threshold = round(rate * self.ENDING_PARTIAL_SECONDS)
+        ending = activity.quiet >= quiet_threshold and self.last_ending_voiced != activity.voiced
+        streaming = self.settings.get('streaming', False)
+        # A long speculative decode could delay the final if speech resumes.
+        if not streaming and (not ending or self.audio.size > rate * 2 * self.MAX_ENDING_PREFETCH_SECONDS):
+            return
+        if self.audio.size < round(rate * self.FIRST_PARTIAL_SECONDS) * 2:
+            return
+        if not ending:
+            interval = self.ONGOING_PARTIAL_SECONDS if self.transcript.committed else self.EARLY_PARTIAL_SECONDS
+            if self.audio.size < self.last_partial_size + round(rate * interval) * 2:
+                return
+
+        pcm, rate = self.audio.snapshot()
+        # The drain may contain fresh speech. Only stream a mid-speech snapshot
+        # when live text is enabled.
+        quiet = activity.quiet >= quiet_threshold
+        if (streaming or quiet) and self.worker.submit_partial(ticket, pcm, rate):
+            self.last_partial_size = len(pcm)
+            if quiet:
+                self.last_ending_voiced = activity.voiced
 
     def dispatch(self, action):
         if self.closed:
@@ -231,7 +237,7 @@ class VoiceController(QObject):
             self.fill_chat(ticket, text, time.monotonic())
 
     def partial_recognized(self, ticket, text, error, metrics=None):
-        if self.closed:
+        if self.closed or not self.settings.get('streaming', False):
             return
         if not self.gate.valid(ticket, 'recording') or not self.bridge.foreground(self.gate.window):
             return
@@ -399,7 +405,7 @@ from .feature_pages import FeatureDialog, VoicePage
 class VoiceSettings(FeatureDialog):
     def __init__(self, controller):
         super().__init__(VoicePage(controller), '萨勒芬妮 · 语音输入')
-        for name in ('devices', 'test_audio', 'test_timer', 'test_button', 'test_status', 'level', 'status'):
+        for name in ('devices', 'test_audio', 'test_timer', 'test_button', 'test_status', 'level'):
             setattr(self, name, getattr(self.page, name))
         for name in ('refresh_devices', 'toggle_test', 'update_test', 'stop_test', 'microphone', 'enabled'):
             setattr(self, name, getattr(self.page, name))

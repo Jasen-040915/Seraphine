@@ -6,14 +6,15 @@ as both native scoreboard columns when their champion rows are dragged.
 import json
 from pathlib import Path
 
-from .model import player_id
+from .model import player_id, valid_team_size
 
 
-def native_rows(players):
+def native_rows(players, *, is_custom_game=False):
     result = {}
     for team in ('ORDER', 'CHAOS'):
         ids = [player_id(p) for p in players if p.get('team') == team]
-        result[team] = ids if len(ids) == 5 and all(ids) and len(set(ids)) == 5 else [None] * 5
+        valid = valid_team_size(len(ids), is_custom_game) and all(ids) and len(set(ids)) == len(ids)
+        result[team] = ids + [None] * (5 - len(ids)) if valid else [None] * 5
     return result
 
 
@@ -24,23 +25,29 @@ class ScoreboardRows:
 
     def reset(self):
         self.visible = False
+        self.press_origin = None
         self.mouse_held = False
         self.waiting_for_update = None
 
-    def poll(self, state, keys, visible, moving_frame=False):
+    def poll(self, state, keys, visible, moving_frame=False, cursor=None):
         if not visible:
-            self.visible = False
-            self.mouse_held = False
-            self.waiting_for_update = None
+            self.reset()
             return False
         if not self.visible:
             self.visible = True
             state.scoreboard_order = {}
-        if keys.down(0x01) and not moving_frame:
-            changed = bool(state.scoreboard_order)
-            state.scoreboard_order = {}
-            self.mouse_held = True
-            return changed
+        if keys.down(0x01) and not moving_frame and cursor is not None:
+            if self.press_origin is None:
+                self.press_origin = cursor
+            # Pressing a difference also holds the button. Wait for motion
+            # before clearing the row values and their published click zones.
+            if self.mouse_held or (cursor - self.press_origin).manhattanLength() >= 10:
+                changed = bool(state.scoreboard_order)
+                state.scoreboard_order = {}
+                self.mouse_held = True
+                return changed
+        else:
+            self.press_origin = None
         if self.mouse_held:
             # The old response may predate the drop. Wait for a fresh API
             # snapshot rather than briefly showing the previous row pairing.
@@ -49,7 +56,7 @@ class ScoreboardRows:
         if state.players is self.waiting_for_update:
             return False
         self.waiting_for_update = None
-        result = native_rows(state.players)
+        result = native_rows(state.players, is_custom_game=state.is_custom_game)
         changed = result != state.scoreboard_order
         state.scoreboard_order = result
         if changed and self.profile:

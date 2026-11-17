@@ -13,7 +13,8 @@ import win32gui
 
 from PyQt5.QtCore import QRectF
 
-from app.common.config import cfg, VERSION
+from app.common.config import cfg, VERSION, GITHUB_URL
+from app.common.update import release_update, github_proxy
 from app.common.logger import logger
 
 
@@ -21,25 +22,23 @@ TAG = "Util"
 
 
 class Github:
-    def __init__(self, user="Zzaphkiel", repositories="Seraphine"):
-        self.githubApi = "http://api.github.com"
-        self.giteeApi = "http://gitee.com/api"
-
-        self.proxyApi = 'https://ghproxy.net'
-
-        self.user = user
+    def __init__(self, user=None, repositories="Seraphine"):
+        self.githubApi = "https://api.github.com"
+        self.user = user or GITHUB_URL.rstrip('/').split('/')[-2]
         self.repositories = repositories
         self.sess = requests.session()
 
     def getReleasesInfo(self):
         url = f"{self.githubApi}/repos/{self.user}/{self.repositories}/releases/latest"
 
-        if cfg.get(cfg.enableGithubProxy):
-            proxy = {'https': cfg.get(cfg.githubProxyAddr)}
-        else:
-            proxy = None
-
-        return self.sess.get(url, proxies=proxy).json()
+        address = github_proxy(cfg.get(cfg.enableGithubProxy), cfg.get(cfg.githubProxyAddr))
+        response = self.sess.get(url, proxies={'https': address} if address else None,
+                                 timeout=(5, 15), headers={'Accept': 'application/vnd.github+json',
+                                                          'User-Agent': 'Seraphine/' + VERSION})
+        if response.status_code == 404:
+            return {}
+        response.raise_for_status()
+        return response.json()
 
     def checkUpdate(self):
         """
@@ -48,26 +47,7 @@ class Github:
         """
         info = self.getReleasesInfo()
 
-        ver_info = self.__getVersionInfo()
-        info["forbidden"] = ver_info.get("forbidden", False)
-
-        if info.get("tag_name")[1:] != VERSION:
-            return info
-        return None
-
-    def __getVersionInfo(self):
-        url = f'{self.githubApi}/repos/{self.user}/{self.repositories}/contents/document/ver.json'
-        if cfg.get(cfg.enableGithubProxy):
-            proxy = {'https': cfg.get(cfg.githubProxyAddr)}
-        else:
-            proxy = None
-
-        res = self.sess.get(url, proxies=proxy).json()
-
-        json_data = json.loads(
-            str(base64.b64decode(res['content']), encoding='utf-8'))
-
-        return json_data.get(VERSION, {})
+        return release_update(info, VERSION, f'{self.user}/{self.repositories}')
 
     def getNotice(self):
         url = f'{self.githubApi}/repos/{self.user}/{self.repositories}/contents/document/notice.md'
