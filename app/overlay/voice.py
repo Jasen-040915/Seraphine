@@ -38,14 +38,16 @@ class VoiceController(QObject):
         self.audio.failed.connect(self.audio_failed)
         self.worker = RecognitionWorker(self)
         self.worker.prepared.connect(self.prepared)
+        self.worker.finished.connect(self._worker_finished)
         self.worker.result.connect(self.recognized)
         self.worker.partial.connect(self.partial_recognized)
         self.hook = KeyboardHook(self.gate, self.key_action.emit)
         self.key_action.connect(self.dispatch, Qt.QueuedConnection)
         self.dialog = None
         self.ready = False
-        self.status = '正在准备本地语音模型…' if running else '本地语音输入（自检模式）'
+        self.status = '进入对局后准备语音' if running else '本地语音输入（自检模式）'
         self.running, self.worker_started, self.closed = running, False, False
+        self.worker_active = False
         self.started_at = 0
         self.stopped_at = None
         self.timings = {}
@@ -65,7 +67,6 @@ class VoiceController(QObject):
             self.gate = self.hook.gate
             self.hook_started = True
             self.timer.start(50)
-            QTimer.singleShot(700, self.prepare)
 
     def report(self, event, **details):
         # Operational metadata only; never persist microphone audio or words.
@@ -88,14 +89,26 @@ class VoiceController(QObject):
 
     def prepare(self):
         if (not self.closed and self.running
-                and self.settings.get('enabled', True) and not self.worker_started):
+                and self.settings.get('enabled', True) and not self.worker_started and not self.worker_active):
             self.worker_started = True
+            self.worker_active = True
+            self.status = '正在准备本地语音模型…'
             self.worker.start()
 
+    def release_model(self):
+        if self.worker_started:
+            self.worker_started = False
+            self.ready = False
+            self.status = '进入对局后准备语音'
+            self.worker.release()
+
+    def _worker_finished(self):
+        self.worker_active = False
+
     def prepared(self, ready, error):
-        self.ready = ready
-        if self.closed:
+        if self.closed or not self.worker_started:
             return
+        self.ready = ready
         self.status = '就绪 · Enter 打开聊天，可打字或说话；填入后可删改，再按 Enter 发送' if ready else error
         self.report('prepared', error=error)
         self.tick()
@@ -114,7 +127,10 @@ class VoiceController(QObject):
             return
         focused = self.keys.foreground() if self.running else False
         enabled = self.settings.get('enabled', True) and self.running
-        window = int(self.keys.last_window or 0) if focused and self.live() else 0
+        live = self.running and self.live()
+        if live and enabled:
+            self.prepare()
+        window = int(self.keys.last_window or 0) if focused and live else 0
         action = self.gate.context(enabled, self.ready, window)
         if action.action:
             self.dispatch(action)
@@ -334,6 +350,7 @@ class VoiceController(QObject):
         self.cancel_delivery()
         self.audio.cancel()
         self.dispatch(self.gate.reset())
+        self.release_model()
         self.last_share = -10
         self.report('match_reset')
 

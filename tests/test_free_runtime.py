@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 from app.common.qt_runtime import configure_qt_plugins
 configure_qt_plugins()
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtTest import QTest
 from app.overlay.panels import OverlayController, demo_payload
 from app.overlay.voice_keys import KeyDecision
 
@@ -33,8 +34,10 @@ class FreeRuntimeTests(unittest.TestCase):
              patch('app.overlay.voice.KeyboardHook.start') as keyboard, \
              patch('app.overlay.voice.RecognitionWorker.start') as speech:
             c = self.controller(start_reader=True)
-            c.voice.prepare()
-            c.voice.prepare()
+            QTest.qWait(800)
+            speech.assert_not_called()
+            c.game_phase('GameStart')
+            c.game_phase('InProgress')
             for service in (reader, mouse, keyboard, speech):
                 service.assert_called_once()
             self.assertTrue(c.timer.isActive() and c.voice.timer.isActive())

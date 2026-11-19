@@ -279,7 +279,9 @@ class OverlayController(QObject):
             self.is_custom_game = session.get('gameData', {}).get('isCustomGame') is True
 
     def game_phase(self, phase):
-        if phase in ('None', 'Lobby', 'Matchmaking', 'ChampSelect', 'EndOfGame', 'PreEndOfGame'):
+        if phase in ('GameStart', 'InProgress', 'Reconnect'):
+            self.voice.prepare()
+        elif phase in ('None', 'Lobby', 'Matchmaking', 'ChampSelect', 'EndOfGame', 'PreEndOfGame'):
             self.game_generation += 1
             self.is_custom_game = False
             self.voice.reset_match()

@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import json
 import os
 import re
@@ -11,13 +10,14 @@ from asyncio import CancelledError
 from collections import deque
 
 import aiohttp
+import psutil
 import requests
 from PyQt5.QtCore import QObject
 
 from app.common.config import cfg, Language
 from app.common.logger import logger
 from app.common.signals import signalBus
-from app.common.util import getPortTokenServerByPid, getTasklistPath, getLolClientPid
+from app.common.util import getPortTokenServerByPid, getLolProcesses
 from app.lol.exceptions import *
 
 requests.packages.urllib3.disable_warnings()
@@ -26,27 +26,22 @@ TAG = "Connector"
 
 
 class PastRequest:
-    def __init__(self, func: str, params_dict, kwargs):
-        self.func = func  # 此处需要 func.__name__ 而不是 func 本身的 obj
-        self.params_dict = params_dict
-        self.kwargs = kwargs
-        self.response = None
+    def __init__(self, func: str):
+        self.func = func
+        self.status = 'pending'
         self.timestamp = time.time()
 
     def __str__(self):
-        # 如果是 None 的成员, 不会被打印; 没打印 response 就是没有响应;
-        attrs = [f"{k}={v!r}" for k, v in self.__dict__.items()
-                 if v is not None]
-        return f"PastRequest({', '.join(attrs)})"
+        return f"PastRequest({self.func}, {self.status}, {self.timestamp})"
 
 
 def needLcu():
     def decorator(func):
-        async def wrapper(*args, **kwargs):
-            if connector.lcuSess is None:
-                raise ReferenceError
+        async def wrapper(self, *args, **kwargs):
+            if self.lcuSess is None or self.lcuSess.closed:
+                raise ClientSessionClosed("LCU session is not open")
 
-            return await func(*args, **kwargs)
+            return await func(self, *args, **kwargs)
 
         return wrapper
 
@@ -55,57 +50,39 @@ def needLcu():
 
 def retry(count=5, retry_sep=0):
     def decorator(func):
-        async def wrapper(*args, **kwargs):
-            logger.info(f"call %s" % func.__name__, TAG)
+        async def wrapper(self, *args, **kwargs):
+            logger.info(f"call {func.__name__}", TAG)
+            semaphore = self.semaphore
+            if semaphore is None:
+                raise ClientSessionClosed("LCU session is not open")
 
-            # 获取函数的参数信息
-            func_params = inspect.signature(func).parameters
-            param_names = list(func_params.keys())
-
-            tmp_args = args
-            if param_names[0] == "self":
-                # args[0] 是 self(connector) 的实例, 兼容静态方法
-                param_names = param_names[1:]
-                tmp_args = args[1:]
-
-            # 构建参数字典，将参数名与对应的实参值一一对应
-            params_dict = {param: arg for param,
-                           arg in zip(param_names, tmp_args)}
-
-            logger.debug(f"args = {params_dict}|kwargs = {kwargs}", TAG)
-            # logger.debug(f"args = {args[1:]}|kwargs = {kwargs}", TAG)
-
-            with connector.dqLock:
-                req_obj = PastRequest(
-                    func.__name__,
-                    params_dict,
-                    kwargs
-                )
-                connector.callStack.append(req_obj)
+            # Keep diagnostic history bounded even for large responses or tracebacks.
+            req_obj = PastRequest(func.__name__)
+            with self.dqLock:
+                self.callStack.append(req_obj)
 
             exce = None
             for _ in range(count):
-                try:
-                    async with connector.semaphore:
-                        res = await func(*args, **kwargs)
-                except CancelledError:
-                    # Fix: 使用 task.cancel() 偶尔会停不下 task -- By Hpero4
-                    #   在调用 cancel() 时, 会从调用栈的最底抛出 CancelledError, 最终传递到 loop 终止 task;
-                    #   由于 CancelledError 是 BaseException 的子类,
-                    #   若 task 恰好跑到被 retry 装饰的函数中, 会被 retry 中的 BaseException 捕获并吞掉, 从而无事发生
-                    raise
-                except BaseException as e:
-                    time.sleep(retry_sep)
-                    exce = e
+                async with semaphore:
+                    if self.semaphore is not semaphore:
+                        raise ClientSessionClosed("LCU session changed")
+                    try:
+                        res = await func(self, *args, **kwargs)
+                    except (CancelledError, ClientSessionClosed, SummonerNotFound) as error:
+                        req_obj.status = type(error).__name__
+                        raise
+                    except BaseException as e:
+                        exce = e
+                    else:
+                        if self.semaphore is not semaphore:
+                            raise ClientSessionClosed("LCU session changed")
+                        break
 
-                    # SummonerNotFound 再重试会报 429 (限流)
-                    if isinstance(e, SummonerNotFound):
-                        raise e
-
-                    continue
-                else:
-                    break
+                if retry_sep:
+                    await asyncio.sleep(retry_sep)
             else:
+                if self.semaphore is not semaphore:
+                    raise ClientSessionClosed("LCU session changed")
                 # 有异常抛异常, 没异常抛 RetryMaximumAttempts
                 exce = exce if exce else RetryMaximumAttempts(
                     "Exceeded maximum retry attempts.")
@@ -116,18 +93,14 @@ def retry(count=5, retry_sep=0):
                     signalBus.lcuApiExceptionRaised.emit(
                         func.__name__, exce)
 
-                with connector.dqLock:
-                    req_obj.response = exce
+                req_obj.status = type(exce).__name__
 
                 logger.exception(f"exit {func.__name__}", exce, TAG)
 
                 raise exce
 
-            with connector.dqLock:
-                req_obj.response = res
-
+            req_obj.status = 'ok'
             logger.info(f"exit {func.__name__}", TAG)
-            logger.debug(f"result = {res}", TAG)
 
             return res
 
@@ -167,31 +140,24 @@ class LcuWebSocket():
                 # return
 
     async def runWs(self):
-        self.session = aiohttp.ClientSession(
+        async with aiohttp.ClientSession(
             auth=aiohttp.BasicAuth('riot', self.token),
             headers={
                 'Content-type': 'application/json',
                 'Accept': 'application/json'
             }
-        )
-        address = f'wss://127.0.0.1:{self.port}/'
-        self.ws = await self.session.ws_connect(address, ssl=False)
+        ) as session:
+            address = f'wss://127.0.0.1:{self.port}/'
+            try:
+                async with session.ws_connect(address, ssl=False) as ws:
+                    for event in self.events:
+                        await ws.send_json([5, event])
 
-        # see: https://hextechdocs.dev/getting-started-with-the-lcu-websocket/
-        for event in self.events:
-            await self.ws.send_json([5, event])
-
-        while True:
-            msg = await self.ws.receive()
-
-            if msg.type == aiohttp.WSMsgType.TEXT and msg.data != '':
-                data = json.loads(msg.data)[2]
-                self.matchUri(data)
-            elif msg.type == aiohttp.WSMsgType.CLOSED:
-                logger.info("WebSocket closed", TAG)
-                break
-
-        await self.session.close()
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT and msg.data:
+                            self.matchUri(json.loads(msg.data)[2])
+            except aiohttp.ClientConnectionError as e:
+                logger.info(f"LCU WebSocket disconnected: {type(e).__name__}", TAG)
 
     async def start(self):
         if "OnJsonApiEvent" in self.events:
@@ -203,7 +169,12 @@ class LcuWebSocket():
 
     async def close(self):
         self.task.cancel()
-        await self.session.close()
+        try:
+            await self.task
+        except CancelledError:
+            pass
+        except Exception as e:
+            logger.exception("LCU WebSocket failed", e, TAG)
 
 
 class LolClientConnector(QObject):
@@ -213,6 +184,8 @@ class LolClientConnector(QObject):
         self.maxRefCnt = cfg.get(cfg.apiConcurrencyNumber)
 
         self.semaphore = None
+        self.pid = None
+        self.listener = None
         self.lcuSess = None
         self.sgpSess = None
         self.port = None
@@ -231,77 +204,86 @@ class LolClientConnector(QObject):
         '''
         只是为了 debug 的时候省事罢了
         '''
-        path = getTasklistPath()
-        pid = getLolClientPid(path)
+        processes = getLolProcesses()
+        if processes and processes[0]:
+            await self.start(processes[0][0])
 
-        await self.start(pid)
-
-    async def start(self, pid):
+    async def start(self, pid, *, listen=True):
         self.pid = pid
 
         try:
             self.port, self.token, self.server = getPortTokenServerByPid(pid)
-        except:
-            signalBus.getCmdlineError.emit()
-            return
+        except psutil.NoSuchProcess as e:
+            raise RetryMaximumAttempts("League client exited during startup.") from e
+        except Exception as e:
+            if psutil.pid_exists(pid):
+                signalBus.getCmdlineError.emit()
+                return False
+            raise RetryMaximumAttempts("League client exited during startup.") from e
 
+        if not self.port or not self.token:
+            raise RetryMaximumAttempts("League client is not ready.")
         self.semaphore = asyncio.Semaphore(self.maxRefCnt)
 
         await self.__initSessions()
         self.__initPlatformInfo()
         await self.__initManager()
         self.__initFolder()
-        await self.__runListener()
         await self.__initRuneStyle()
+        if listen:
+            await self.startListener()
 
         logger.critical(f"connector started, server: {self.server}", TAG)
+        return True
 
-    async def __runListener(self):
-        self.listener = LcuWebSocket(self.port, self.token)
+    async def startListener(self):
+        listener = self.listener = LcuWebSocket(self.port, self.token)
 
-        @self.listener.subscribe(event='OnJsonApiEvent_lol-summoner_v1_current-summoner',
-                                 uri='/lol-summoner/v1/current-summoner',
-                                 type=('Update',))
+        @listener.subscribe(event='OnJsonApiEvent_lol-summoner_v1_current-summoner',
+                            uri='/lol-summoner/v1/current-summoner',
+                            type=('Update',))
         async def onCurrentSummonerProfileChanged(event):
-            signalBus.currentSummonerProfileChanged.emit(event['data'])
+            if self.listener is listener:
+                signalBus.currentSummonerProfileChanged.emit(event['data'])
 
-        @self.listener.subscribe(event='OnJsonApiEvent_lol-gameflow_v1_gameflow-phase',
-                                 uri='/lol-gameflow/v1/gameflow-phase',
-                                 type=('Update',))
+        @listener.subscribe(event='OnJsonApiEvent_lol-gameflow_v1_gameflow-phase',
+                            uri='/lol-gameflow/v1/gameflow-phase',
+                            type=('Update',))
         async def onGameFlowPhaseChanged(event):
-            signalBus.gameStatusChanged.emit(event['data'])
+            if self.listener is listener:
+                signalBus.gameStatusChanged.emit(event['data'])
 
-        @self.listener.subscribe(event='OnJsonApiEvent_lol-champ-select_v1_session',
-                                 uri='/lol-champ-select/v1/session',
-                                 type=('Update',))
+        @listener.subscribe(event='OnJsonApiEvent_lol-champ-select_v1_session',
+                            uri='/lol-champ-select/v1/session',
+                            type=('Update',))
         async def onChampSelectChanged(event):
-            signalBus.champSelectChanged.emit(event)
+            if self.listener is listener:
+                signalBus.champSelectChanged.emit(event)
 
-        @self.listener.subscribe(event="OnJsonApiEvent_entitlements_v1_token",
-                                 uri='/entitlements/v1/token',
-                                 type=("Update",))
+        @listener.subscribe(event="OnJsonApiEvent_entitlements_v1_token",
+                            uri='/entitlements/v1/token',
+                            type=("Update",))
         async def onSGPTokenChanged(event):
-            self.sgpToken = event['data']['accessToken']
+            if self.listener is listener:
+                self.sgpToken = event['data']['accessToken']
 
-        # @self.listener.subscribe(event='OnJsonApiEvent', type=())
+        # @listener.subscribe(event='OnJsonApiEvent', type=())
         # async def onDebugListen(event):
         #     print(event)
 
-        await self.listener.start()
+        await listener.start()
 
     async def close(self):
-        try:
-            await self.listener.close()
-        except:
-            pass
-
-        if self.lcuSess:
-            await self.lcuSess.close()
-
-        if self.sgpSess:
-            await self.sgpSess.close()
-
+        listener, lcu_session, sgp_session = self.listener, self.lcuSess, self.sgpSess
         self.__init__()
+        try:
+            if listener is not None:
+                await listener.close()
+        finally:
+            if lcu_session is not None:
+                await lcu_session.close()
+            if sgp_session is not None:
+                await sgp_session.close()
 
     async def __initSessions(self):
         self.lcuSess = aiohttp.ClientSession(
@@ -401,28 +383,21 @@ class LolClientConnector(QObject):
         @return: json
         @rtype: dict
         """
-        retries = 0
-        while retries < max_retries:
+        session = self.lcuSess
+        for attempt in range(max_retries):
+            if self.lcuSess is not session:
+                raise ClientSessionClosed("LCU session changed")
             try:
-                result = await self.__get(url)
-                result = await result.json()
-
-            # 客户端刚打开, Service 正在初始化
-            # 有部分请求可能会 ConnectionError, 直接忽略重试
-            except aiohttp.ClientConnectorError:
-                retries += 1
-                time.sleep(.5)
-                continue
-
-            if type(result) is list:
-                return result
-
-            # 如果有才判定, 有部分相应成功时没有 httpStatus
-            elif result.get("httpStatus") and result.get("httpStatus") != 200:
-                time.sleep(.5)
-                retries += 1
+                response = await self.__get(url)
+                result = await response.json()
+            except aiohttp.ClientConnectionError:
+                pass
             else:
-                return result
+                if isinstance(result, list) or result.get("httpStatus") in (None, 200):
+                    return result
+
+            if attempt + 1 < max_retries:
+                await asyncio.sleep(.5)
 
         # 最大重试次数, 抛异常
         raise RetryMaximumAttempts("Exceeded maximum retry attempts.")

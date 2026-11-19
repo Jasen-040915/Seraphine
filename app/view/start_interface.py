@@ -15,7 +15,7 @@ from app.lol.connector import connector
 from app.common.config import cfg
 from app.common.style_sheet import StyleSheet
 from app.common.icons import Icon
-from app.common.util import getTasklistPath, getLolClientPids, getLolClientPidsSlowly
+from app.common.util import getLolProcesses
 from app.common.signals import signalBus
 from app.components.message_box import ChangeClientMessageBox
 
@@ -117,11 +117,10 @@ class StartInterface(SeraphineInterface):
             else:
                 self.__showLolClientPathErrorInfo()
         else:
-            path = getTasklistPath()
-            if path:
-                pids = getLolClientPids(path)
-            else:
-                pids = getLolClientPidsSlowly()
+            processes = getLolProcesses()
+            if processes is None:
+                return
+            pids, _ = processes
 
             if len(pids) == 0:
                 signalBus.lolClientEnded.emit()

@@ -899,7 +899,7 @@ async def parseGameInfoByGameflowSession(session, currentSummonerId, side, useSG
 def sortedSummonersByGameRole(summoners: list):
     position = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
 
-    if any(x['selectedPosition'] not in position for x in summoners):
+    if any(x.get('selectedPosition') not in position for x in summoners):
         return None
 
     return sorted(summoners,

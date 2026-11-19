@@ -8,7 +8,7 @@ import aiohttp
 
 from app.common.logger import logger
 from app.common.signals import signalBus
-from app.common.util import getLolClientPids, isLolGameProcessExist, getTasklistPath
+from app.common.util import getLolProcesses
 
 TAG = "Listener"
 
@@ -21,15 +21,12 @@ class LolProcessExistenceListener(QThread):
         super().__init__(parent)
 
     def run(self):
-        path = getTasklistPath()
-
-        if not path:
-            signalBus.tasklistNotFound.emit()
-            return
-
         while True:
-            # 取一下当前运行中的所有客户端 pid
-            pids = getLolClientPids(path)
+            processes = getLolProcesses()
+            if processes is None:
+                self.msleep(1500)
+                continue
+            pids, game_running = processes
 
             # 如果有客户端正在运行
             if len(pids) != 0:
@@ -47,7 +44,7 @@ class LolProcessExistenceListener(QThread):
 
             # 如果没有任何客户端在运行，且上一次检查时有客户端在运行
             else:
-                if self.runningPid and not isLolGameProcessExist(path):
+                if self.runningPid and not game_running:
                     self.runningPid = 0
                     signalBus.lolClientEnded.emit()
 

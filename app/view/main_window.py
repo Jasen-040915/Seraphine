@@ -9,7 +9,7 @@ from pathlib import Path
 import pyperclip
 
 import asyncio
-from aiohttp.client_exceptions import ClientConnectorError
+from aiohttp.client_exceptions import ClientConnectionError, ClientConnectorError
 from qasync import asyncClose, asyncSlot
 from PyQt5.QtCore import Qt, pyqtSignal, QSize, QEvent, QTimer, QPoint
 from PyQt5.QtGui import QIcon, QImage
@@ -27,8 +27,7 @@ from app.view.game_info_interface import GameInfoInterface
 from app.view.auxiliary_interface import AuxiliaryInterface
 from app.view.opgg_window import OpggWindow
 from app.overlay.panels import OverlayController
-from app.common.util import (github, getLolClientPid, getTasklistPath,
-                             getLolClientPidSlowly, getLoLPathByRegistry)
+from app.common.util import github, getLolProcesses, getLoLPathByRegistry
 from app.components.avatar_widget import NavigationAvatarWidget
 from app.components.temp_system_tray_menu import TmpSystemTrayMenu
 from app.common.icons import Icon
@@ -39,7 +38,7 @@ from app.common.window_activation import restore_window, tray_opens_window
 from app.components.message_box import (UpdateMessageBox, NoticeMessageBox,
                                         WaitingForLolMessageBox, ExceptionMessageBox,
                                         ChangeDpiMessageBox)
-from app.lol.exceptions import (SummonerGamesNotFound, RetryMaximumAttempts,
+from app.lol.exceptions import (ClientSessionClosed, SummonerGamesNotFound, RetryMaximumAttempts,
                                 SummonerNotFound, SummonerNotInGame, SummonerRankInfoNotFound)
 from app.lol.listener import (LolProcessExistenceListener, StoppableThread)
 from app.lol.connector import connector
@@ -93,6 +92,9 @@ class MainWindow(FluentWindow):
 
         # create listener
         self.isClientProcessRunning = False
+        self.clientConnectionLock = asyncio.Lock()
+        self.clientConnectionGeneration = 0
+        self.clientStartupTask = None
         self.processListener = LolProcessExistenceListener(self)
         self.checkUpdateThread = StoppableThread(
             target=self.checkUpdate, parent=self)
@@ -105,7 +107,6 @@ class MainWindow(FluentWindow):
 
         self.isGaming = False
         self.isTrayExit = False
-        self.tasklistEnabled = True
         self.championSelection = ChampionSelection()
 
         self.lastTipsTime = time.time()
@@ -400,8 +401,6 @@ class MainWindow(FluentWindow):
         msgBox.exec()
 
     def __showWaitingMessageBox(self):
-        self.tasklistEnabled = False
-
         msgBox = WaitingForLolMessageBox(self.window())
 
         if not msgBox.exec():
@@ -484,105 +483,94 @@ class MainWindow(FluentWindow):
         self.checkNoticeThread.start()
         # self.minimizeThread.start()  # 该功能不再支持 -- By Hpero4
 
-    async def __changeCareerToCurrentSummoner(self):
-        summoner = await connector.getCurrentSummoner()
-        self.currentSummoner = summoner
-        name = summoner.get("gameName") or summoner['displayName']
-        self.careerInterface.setLoginSummonerPuuid(summoner['puuid'])
-
-        asyncio.create_task(self.careerInterface.updateInterface(
-            summoner=summoner))
-
     @asyncSlot(int)
     async def __onLolClientStarted(self, pid):
+        await self.__setLolClient(pid)
+
+    @asyncSlot(int)
+    async def __onLolClientChanged(self, pid):
+        logger.critical(f"League of Legends client changed: {pid}", TAG)
+        self.processListener.runningPid = pid
+        await self.__setLolClient(pid)
+
+    @asyncSlot()
+    async def __onLolClientEnded(self):
+        await self.__setLolClient(None)
+
+    async def __setLolClient(self, pid):
+        self.clientConnectionGeneration += 1
+        generation = self.clientConnectionGeneration
+        # 等上一轮初始化退出后再关闭会话，锁内只处理最新的客户端事件。
+        if self.clientStartupTask is not None and not self.clientStartupTask.cancelling():
+            self.clientStartupTask.cancel()
+
+        async with self.clientConnectionLock:
+            if generation != self.clientConnectionGeneration:
+                return
+
+            if pid is None or connector.pid is not None:
+                await self.__disconnectLolClient()
+            if pid is None or generation != self.clientConnectionGeneration:
+                return
+
+            startup = self.clientStartupTask = asyncio.create_task(self.__connectLolClient(pid))
+            try:
+                connected = await startup
+            except asyncio.CancelledError:
+                if generation == self.clientConnectionGeneration:
+                    await self.__disconnectLolClient()
+                    raise
+                return
+            except (RetryMaximumAttempts, ReferenceError, ClientConnectionError, TimeoutError):
+                logger.info(f"League of Legends client not ready: {pid}", TAG)
+                connected = False
+            finally:
+                self.clientStartupTask = None
+
+            if connected:
+                return
+            await self.__disconnectLolClient()
+            if generation != self.clientConnectionGeneration:
+                return
+
+            if self.processListener.isRunning():
+                if self.processListener.runningPid == pid:
+                    self.processListener.runningPid = 0
+            else:
+                signalBus.tasklistNotFound.emit()
+
+    async def __connectLolClient(self, pid):
         logger.info(f"League of Legends client started: {pid}", TAG)
-        res = await self.__startConnector(pid)
-        if not res:
-            return
+        if not await connector.start(pid, listen=False):
+            return False
+        summoner = await connector.getCurrentSummoner()
+        folder = await connector.getInstallFolder()
 
         await opgg.start()
         self.checkAndSwitchTo(self.careerInterface)
         self.isClientProcessRunning = True
 
-        await self.__changeCareerToCurrentSummoner()
+        self.currentSummoner = summoner
+        self.careerInterface.setLoginSummonerPuuid(summoner['puuid'])
         await self.__updateAvatarIconName()
 
+        await connector.startListener()
+        status = await connector.getGameStatus()
         self.startInterface.hideLoadingPage()
-
-        folder, status = await asyncio.gather(connector.getInstallFolder(),
-                                              connector.getGameStatus())
-
         self.__setLolInstallFolder(folder)
 
-        asyncio.create_task(self.auxiliaryFuncInterface.initChampionList())
-
         self.auxiliaryFuncInterface.lockConfigCard.loadNowMode()
-
-        # 加载大乱斗buff -- By Hpero4
-        aramInitT = asyncio.create_task(AramBuff.checkAndUpdate())
-        championsInit = asyncio.create_task(ChampionAlias.checkAndUpdate())
-
-        asyncio.create_task(self.opggWindow.initWindow())
         self.opggWindow.setHomeInterfaceEnabled(False)
-
-        # ---- 240413 ---- By Hpero4
-        # 如果你希望 self.__onGameStatusChanged(status) 和 self.__unlockInterface() 并行执行, 可以这样使用:
-        #     t = self.__onGameStatusChanged(status)
-        #     self.__unlockInterface()
-        #     await t
-        #
-        # 如果你希望等待 self.__onGameStatusChanged(status) 返回之后再执行 self.__unlockInterface() 可以这样使用:
-        #     await self.__onGameStatusChanged(status)
-        #     self.__unlockInterface()
-        #
-        # 而不是直接调用:
-        #     self.__onGameStatusChanged(status)
-        #     self.__unlockInterface()
-        #
-        # 此外 self.__onGameStatusChanged(status) 本身不是一个常规的异步函数, 它是使用 asyncSlot 装饰的槽函数,
-        #   内部封装了task的新建过程, 并且会被立即加入到 QEventLoop 等待执行, 并返回一个Task实例;
-        #
-        # 如果 func a 是一个常规异步函数, func b 是一个常规的同步函数, 你应该这样使用它:
-        #     t = asyncio.create_task(a())
-        #     b()
-        #     await t
-        #
-        # 项目中还有其他异步函数使用了await进行了额外的等待, 亦或是直接调用异步函数而没有使用await保证竞态的情况,
-        # 这可能导致性能或是其他不可预期的问题, 这是只是一个例子;
-        # ---- 240413 ---- By Hpero4
-
         self.__unlockInterface()
-        await asyncio.gather(championsInit, aramInitT)
+
+        asyncio.create_task(self.careerInterface.updateInterface(summoner=summoner))
+        asyncio.create_task(self.auxiliaryFuncInterface.initChampionList())
+        asyncio.create_task(self.opggWindow.initWindow())
+        await asyncio.gather(ChampionAlias.checkAndUpdate(), AramBuff.checkAndUpdate())
         await self.__onGameStatusChanged(status)
+        return True
 
-        # Note 如果你希望测试大乱斗的数据弹框, 参考这个 -- By Hpero4
-        # self.careerInterface.icon.aramInfo = AramBuff.getInfoByChampionId(75)
-
-    async def __startConnector(self, pid):
-        try:
-            await connector.start(pid)
-            return True
-        except RetryMaximumAttempts:
-            # 若超出最大尝试次数, 则认为 lcu 未就绪 (如大区排队中),
-            # 捕获到该异常时不抛出, 等待下一个 emit
-            await connector.close()
-
-            if self.processListener.isRunning():
-                self.processListener.runningPid = 0
-            else:
-                signalBus.tasklistNotFound.emit()
-
-            return False
-
-    @asyncSlot(int)
-    async def __onLolClientChanged(self, pid):
-        logger.critical(f"League of Legends client changed: {pid}", TAG)
-        await self.__onLolClientEnded()
-        self.processListener.runningPid = pid
-        await self.__onLolClientStarted(pid)
-
-    @asyncSlot()
-    async def __onLolClientEnded(self):
+    async def __disconnectLolClient(self):
         logger.critical("League of Legends client ended", TAG)
         self.overlay.game_phase('None')
 
@@ -594,6 +582,7 @@ class MainWindow(FluentWindow):
         await opgg.close()
 
         self.isClientProcessRunning = False
+        self.isGaming = False
         self.currentSummoner = None
         self.careerInterface.setLoginSummonerPuuid(None)
 
@@ -629,6 +618,8 @@ class MainWindow(FluentWindow):
                                       ToolTipPosition.TOP)
                     )
 
+            except asyncio.CancelledError:
+                raise
             except:
                 icon = "app/resource/images/game.png"
                 name = self.tr("Start LOL")
@@ -672,13 +663,8 @@ class MainWindow(FluentWindow):
         if not cfg.get(cfg.enableStartLolWithApp):
             return
 
-        if self.tasklistEnabled:
-            path = getTasklistPath()
-            pid = getLolClientPid(path)
-        else:
-            pid = getLolClientPidSlowly()
-
-        if pid == 0:
+        processes = getLolProcesses()
+        if processes is not None and not processes[0]:
             self.__startLolClient()
 
     def __startLolClient(self):
@@ -1070,7 +1056,7 @@ class MainWindow(FluentWindow):
         title = self.tr('Exception occurred 😥')
         content = "".join(tracebackFormat)
 
-        if ty in [ConnectionRefusedError, ClientConnectorError]:
+        if ty in [ConnectionRefusedError, ClientConnectorError, ClientSessionClosed]:
             return
 
         logger.error(f"Exception occurred:\n{content}", "Crash")

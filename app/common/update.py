@@ -17,6 +17,7 @@ import requests
 
 MAX_ARCHIVE_BYTES = 2 * 1024 ** 3 - 1
 MAX_EXTRACTED_BYTES = 4 * 1024 ** 3
+STREAM_CHUNK_BYTES = 64 * 1024
 
 
 def version_key(value):
@@ -119,7 +120,7 @@ def extract_update(archive_path, destination, version):
             digest = hashlib.sha256()
             size = 0
             with archive.open(item) as source, target.open('xb') as output:
-                for block in iter(lambda: source.read(1024 * 1024), b''):
+                for block in iter(lambda: source.read(STREAM_CHUNK_BYTES), b''):
                     output.write(block)
                     digest.update(block)
                     size += len(block)
@@ -138,17 +139,21 @@ def prepare_update(info, installation, proxy=None, progress=lambda done, total: 
     try:
         digest = hashlib.sha256()
         received = 0
+        last_percent = -1
         proxies = {'https': proxy} if proxy else None
         with requests.get(asset['browser_download_url'], stream=True, timeout=(10, 60), proxies=proxies) as response:
             response.raise_for_status()
             with archive_path.open('xb') as output:
-                for block in response.iter_content(1024 * 1024):
+                for block in response.iter_content(STREAM_CHUNK_BYTES):
                     received += len(block)
                     if received > asset['size']:
                         raise ValueError('下载文件大小与发布信息不一致')
                     output.write(block)
                     digest.update(block)
-                    progress(received, asset['size'])
+                    percent = received * 100 // asset['size']
+                    if percent != last_percent:
+                        progress(received, asset['size'])
+                        last_percent = percent
         if received != asset['size'] or 'sha256:' + digest.hexdigest() != asset['digest']:
             raise ValueError('下载校验失败，请重试')
         extract_update(archive_path, workspace / 'Seraphine', info['version'])

@@ -100,7 +100,11 @@ class VoicePage(FeaturePage):
 
     def enabled(self, value):
         c = self.controller
-        c.settings['enabled'] = value; c.save(); c.prepare(); c.tick()
+        c.settings['enabled'] = value
+        c.save()
+        if not value:
+            c.release_model()
+        c.tick()
 
     def refresh_devices(self):
         self.stop_test()

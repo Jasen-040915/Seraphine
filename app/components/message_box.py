@@ -17,7 +17,7 @@ from app.common.qfluentwidgets import (MessageBoxBase, SmoothScrollArea,
                                        FlyoutViewBase, PushButton)
 
 from app.common.config import VERSION, cfg, BETA
-from app.common.util import getLolClientPidSlowly
+from app.common.util import getLolProcesses
 from app.common.signals import signalBus
 from app.common.update import runUpdater, prepare_update, github_proxy
 from app.common.logger import logger
@@ -211,12 +211,11 @@ class WaitingForLolMessageBox(MessageBoxBase):
         self.viewLayout.addWidget(self.content)
 
     def __onYesButtonClicked(self):
-        pid = getLolClientPidSlowly()
-
-        if pid == -1:
+        processes = getLolProcesses()
+        if not processes or not processes[0]:
             return
 
-        signalBus.lolClientStarted.emit(pid)
+        signalBus.lolClientStarted.emit(processes[0][0])
         self.accept()
         self.accepted.emit()
 

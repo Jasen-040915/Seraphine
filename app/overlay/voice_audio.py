@@ -240,23 +240,27 @@ class RecognitionWorker(QThread):
             except Exception:
                 signal.emit(ticket, '', '识别失败，请重试', metrics)
 
-    def close(self):
+    def release(self):
         self.requestInterruption()
-        try:
-            self.jobs.put_nowait(None)
-        except queue.Full:
-            pass
+        with self.submit_lock:
+            self._discard_pending()
+
+    def close(self):
+        self.release()
         self.wait(10000)
+
+    def _discard_pending(self):
+        while True:
+            try:
+                self.jobs.get_nowait()
+            except queue.Empty:
+                return
 
     def submit(self, ticket, pcm, rate):
         # Replace canceled pending jobs; a running decode may finish, but its
         # ticket is discarded by the controller and can never send a message.
         with self.submit_lock:
-            while True:
-                try:
-                    self.jobs.get_nowait()
-                except queue.Empty:
-                    break
+            self._discard_pending()
             self.jobs.put_nowait((ticket, pcm, rate, False))
 
     def submit_partial(self, ticket, pcm, rate):

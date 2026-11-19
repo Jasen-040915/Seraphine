@@ -242,7 +242,7 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation prevents an existing delivery from being replaced.
     with output.open('xb') as stream:
-        with zipfile.ZipFile(stream, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=5) as archive:
+        with zipfile.ZipFile(stream, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
             for name, content in sorted(files.items()):
                 if isinstance(content, Path):
                     digest, size = sha(content), content.stat().st_size

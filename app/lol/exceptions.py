@@ -1,3 +1,7 @@
+class ClientSessionClosed(ReferenceError):
+    """The client session for this request has ended."""
+
+
 class SummonerNotFound(BaseException):
     pass
 

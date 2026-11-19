@@ -131,6 +131,28 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual((workspace / 'Seraphine/Seraphine.exe').read_bytes(), b'test-content')
             self.assertEqual((installation / 'Seraphine.exe').read_bytes(), b'old')
 
+    def test_small_download_chunks_do_not_flood_progress_events(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            installation = root / 'Seraphine'
+            installation.mkdir()
+            (installation / 'Seraphine.exe').touch()
+            package = root / 'new.zip'
+            make_package(package)
+            data = package.read_bytes()
+            info = release_update(release(), '1.1.4+free.7', REPO)
+            info['asset'].update(size=len(data), digest='sha256:' + hashlib.sha256(data).hexdigest())
+            response = Mock()
+            response.__enter__ = Mock(return_value=response)
+            response.__exit__ = Mock(return_value=False)
+            response.iter_content.return_value = (data[i:i+1] for i in range(len(data)))
+            progress = Mock()
+            with patch('app.common.update.requests.get', return_value=response):
+                prepare_update(info, installation, progress=progress)
+            response.iter_content.assert_called_once_with(64 * 1024)
+            self.assertLessEqual(progress.call_count, 101)
+            self.assertEqual(progress.call_args.args, (len(data), len(data)))
+
     def test_legacy_update_setting_migrates_once(self):
         with tempfile.TemporaryDirectory() as folder:
             profile = Path(folder) / 'SeraphinePlus'

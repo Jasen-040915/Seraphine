@@ -98,88 +98,40 @@ def getLoLPathByRegistry() -> str:
     return ""
 
 
-def getTasklistPath():
-    for path in ['tasklist',
-                 'C:/Windows/System32/tasklist.exe']:
-        try:
-            cmd = f'{path} /FI "imagename eq LeagueClientUx.exe" /NH'
-            _ = subprocess.check_output(cmd, shell=True)
-            return path
-        except:
-            pass
+def getLolProcesses():
+    """Return (client PIDs, game running), or None if this poll failed."""
+    def match_processes(rows):
+        clients = []
+        game_running = False
+        for pid, name in rows:
+            name = (name or '').casefold().removesuffix('.exe')
+            if name == 'leagueclientux':
+                clients.append(pid)
+            elif name == 'league of legends':
+                game_running = True
+        return clients, game_running
 
-    return None
-
-
-def getLolClientPidSlowly():
-    for process in psutil.process_iter():
-        if process.name() in ['LeagueClientUx.exe', 'LeagueClientUx']:
-            return process.pid
-
-    return -1
-
-
-def getLolClientPid(path):
-    processes = subprocess.check_output(
-        f'{path} /FI "imagename eq LeagueClientUx.exe" /NH', shell=True)
-
-    if b'LeagueClientUx.exe' in processes:
-        arr = processes.split()
-        try:
-            pos = arr.index(b"LeagueClientUx.exe")
-            return int(arr[pos + 1])
-        except ValueError:
-            raise ValueError(f"Subprocess return exception: {processes}")
-    else:
-        return 0
-
-
-def getLolClientPids(path):
     try:
-        processes = subprocess.check_output(
-            f'{path} /FI "imagename eq LeagueClientUx.exe" /NH',
-            shell=True,
-            stderr=subprocess.STDOUT
-        )
-    except subprocess.CalledProcessError as e:
-        logger.error(
-            'an error occurred when calling tasklist command, '
-            f'original output: {e.output.decode()}'
-        )
-        raise e
-
-    pids = []
-
-    if not b'LeagueClientUx.exe' in processes:
-        return pids
-
-    arr = processes.split()
-
-    for i, s in enumerate(arr):
-        if s == b'LeagueClientUx.exe':
-            pids.append(int(arr[i + 1]))
-
-    return pids
+        return match_processes((p.pid, p.info['name'])
+                               for p in psutil.process_iter(['name'], ad_value=None))
+    except (psutil.Error, OSError):
+        # Some Windows installations restrict native process enumeration.
+        tasklist = Path(os.environ['SystemRoot']) / 'System32/tasklist.exe'
+        try:
+            output = subprocess.check_output(
+                [str(tasklist), '/FO', 'CSV', '/NH'], stderr=subprocess.DEVNULL,
+                timeout=3, creationflags=subprocess.CREATE_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        rows = re.findall(rb'^"([^"\r\n]+)","([0-9]+)",', output, re.MULTILINE)
+        if rows:
+            return match_processes((int(pid), name.decode('ascii', errors='replace'))
+                                   for name, pid in rows)
+        return None
 
 
-def getLolClientPidsSlowly():
-    pids = []
-
-    for process in psutil.process_iter():
-        if process.name() in ['LeagueClientUx.exe', 'LeagueClientUx']:
-            pids.append(process.pid)
-
-    return pids
-
-
-def isLolGameProcessExist(path):
-    processes = subprocess.check_output(
-        f'{path} /FI "imagename eq League of Legends.exe" /NH', shell=True)
-
-    return b'League of Legends.exe' in processes
-
-
-def getPortTokenServerByPidViaPsutil(pid):
+def getPortTokenServerByPid(pid):
+    """Read only the selected client. It can exit between polling and connecting."""
     port, token, server = None, None, None
 
     process = psutil.Process(pid)
@@ -203,31 +155,6 @@ def getPortTokenServerByPidViaPsutil(pid):
             break
 
     return port, token, server
-
-
-def getPortTokenServerByPidViaWmic():
-    '''
-    ### 需要管理员权限
-    '''
-    command = "wmic process WHERE name='LeagueClientUx.exe' GET commandline"
-    output = subprocess.check_output(command, shell=True).decode("gbk")
-
-    port = re.findall(r'--app-port=(.+?)"', output)[0]
-    token = re.findall(r'--remoting-auth-token=(.+?)"', output)[0]
-    server = re.findall(r'--rso_platform_id=(.+?)"', output)[0]
-
-    return port, token, server
-
-
-def getPortTokenServerByPid(pid):
-    '''
-    通过进程 id 获得启动命令行参数中的 port、token 以及登录服务器
-    '''
-
-    try:
-        return getPortTokenServerByPidViaPsutil(pid)
-    except:
-        return getPortTokenServerByPidViaWmic()
 
 
 def getFileProperties(fname):

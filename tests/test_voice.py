@@ -2,6 +2,7 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import heapq
 import tempfile
+import threading
 import time
 import wave
 import json
@@ -13,6 +14,7 @@ from unittest.mock import Mock, patch
 from app.common.qt_runtime import configure_qt_plugins
 configure_qt_plugins()
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtTest import QTest
 from app.overlay.voice import VoiceController, VoiceSettings
 from app.overlay.voice_keys import VoiceGate, KeyboardHook, ChatInput
 from app.overlay.voice_audio import (clean_transcript, decode_pcm, SpeechActivity, mono_pcm,
@@ -243,6 +245,41 @@ class VoiceControllerTests(unittest.TestCase):
     def assertFilledText(self, expected):
         self.assertTrue(all(kind == 'text' for kind, _ in self.c.bridge.events))
         self.assertEqual(''.join(value for _, value in self.c.bridge.events), expected)
+
+    def test_match_ending_during_model_load_can_release_and_start_again(self):
+        entered, finish = threading.Event(), threading.Event()
+
+        def load_model():
+            entered.set()
+            self.assertTrue(finish.wait(3))
+            return Mock()
+
+        self.c.running = True
+        self.c.live = lambda: False
+        self.c.keys.foreground.return_value = False
+        with patch('app.overlay.voice_audio.create_recognizer', side_effect=load_model) as load:
+            self.c.prepare()
+            try:
+                self.assertTrue(entered.wait(3))
+                self.c.reset_match()
+                self.c.prepare()
+                self.assertFalse(self.c.worker_started)
+            finally:
+                finish.set()
+            self.assertTrue(self.c.worker.wait(3000))
+            self.app.processEvents()
+            self.assertFalse(self.c.ready)
+            self.assertFalse(self.c.worker_active)
+            self.c.live = lambda: True
+            self.c.tick()
+            deadline = time.monotonic() + 3
+            while not self.c.ready and time.monotonic() < deadline:
+                QTest.qWait(10)
+            self.assertTrue(self.c.ready)
+            self.assertEqual(load.call_count, 2)
+            self.c.reset_match()
+            self.assertTrue(self.c.worker.wait(3000))
+            self.assertFalse(self.c.ready)
 
     def test_full_flow_fills_editable_chat_and_only_user_enter_sends(self):
         QApplication.clipboard().setText('原来的剪贴板')
@@ -812,7 +849,7 @@ class VoiceStreamingIntegrationTests(unittest.TestCase):
             first_append = None
             try:
                 with patch('app.overlay.voice.QTimer.singleShot', side_effect=scheduler.post):
-                    controller.worker.start()
+                    controller.tick()
                     wait_for(lambda: controller.ready)
                     start = controller.gate.key(13, True, 100)
                     controller.gate.key(13, False, 100)
