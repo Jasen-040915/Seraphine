@@ -22,6 +22,7 @@ class BoardPosition:
     center: float
     top: float
     confidence: float
+    width: float = 0.0  # Fraction of the viewport between the measured sides.
 
 
 def _border_peaks(scores):
@@ -37,7 +38,49 @@ def _border_peaks(scores):
     return peaks
 
 
-def find_scoreboard(frame, hint=None):
+def _visible_around_tooltip(gold, dark, sides, anchor, candidates):
+    """Reconfirm a measured frame using its exposed header and upright borders."""
+    height, width = gold.shape
+    middle = anchor.center * width - .5
+    half = anchor.width * width / 2
+    left, right = round(middle - half), round(middle + half)
+    y = round(anchor.top * height - .5)
+    if not half or left < 2 or right >= width - 2 or y < 1 or y + round(height * .10) >= height:
+        return False
+
+    # A gold tooltip border can pair with the opposite real edge, producing
+    # an apparent resize. A strong frame elsewhere must still be considered.
+    for score, x1, x2, top in candidates:
+        if score < candidates[0][0] - .08:
+            break
+        if abs(top - y) > 3 or min(abs(x1 - left), abs(x2 - right)) > 3:
+            return False
+
+    header_visible = False
+    for edge, inward in ((left, 1), (right, -1)):
+        # The tooltip may cover either upper corner. Verify each upright
+        # against dark interior pixels above or below the tooltip.
+        columns = np.arange(edge - 1, edge + 2)
+        border = (sides[:, columns] & dark[:, columns + 2 * inward]).any(axis=1)
+        bands = ((y + round(height * start), y + round(height * (start + .08)))
+                 for start in (.02, .14, .28))
+        if not any(border[begin:end:2].mean() >= .75 for begin, end in bands if end <= height):
+            return False
+        xs = edge + inward * np.arange(round(height * .025), round(height * .23), 2)
+        # At least one long gold header segment must have the native dark
+        # fill immediately beneath it. A row divider has an upright above it.
+        above = slice(max(0, y - round(height * .05)), max(0, y - round(height * .015)), 2)
+        continuation = sides[above, edge - 1:edge + 2].any(axis=1) & dark[above, edge + inward * round(height * .015)]
+        if len(continuation) and continuation.mean() >= .6:
+            continue
+        for row in range(y - 1, y + 2):
+            if (gold[row, xs] & dark[row + max(2, round(height * .008)), xs]).mean() >= .8:
+                header_visible = True
+                break
+    return header_visible
+
+
+def find_scoreboard(frame, hint=None, *, allow_occlusion=False):
     """Find the gold header border, verified by its dark fill and both sides."""
     if frame is None or frame.isNull() or frame.width() < 100 or frame.height() < 100:
         return None
@@ -103,9 +146,12 @@ def find_scoreboard(frame, hint=None):
                     continuation.append((outer & dark_mask[above, inner]).sum() / max(1, len(outer)))
                 if min(continuation) < .6:
                     candidates.append((confidence, left, right, y))
+    candidates.sort(reverse=True)
+    if (allow_occlusion and hint is not None
+            and _visible_around_tooltip(gold_mask, dark_mask, side_mask, hint, candidates)):
+        return hint
     if not candidates:
         return None
-    candidates.sort(reverse=True)
     best = candidates[0]
     same_frame = [c for c in candidates if abs(c[1] - best[1]) <= 5 and abs(c[2] - best[2]) <= 5
                   and abs(c[3] - best[3]) <= 5]
@@ -114,7 +160,7 @@ def find_scoreboard(frame, hint=None):
     # The outermost of the parallel frame lines is a stable anchor.
     edge = min(same_frame, key=lambda c: c[3])
     return BoardPosition((edge[1] + edge[2] + 1) / (2 * width),
-                         (edge[3] + .5) / height, round(best[0], 3))
+                         (edge[3] + .5) / height, round(best[0], 3), (edge[2] - edge[1]) / width)
 
 
 def capture_game(panel):
@@ -137,6 +183,7 @@ class ScoreboardFollow:
         self.next_read = 0
         self.visible = False
         self.position_ready = False
+        self.last_seen_at = None
         self.display_until = 0
         self.viewport_geometry = None
         self.last_position = None
@@ -217,11 +264,11 @@ class ScoreboardFollow:
         position = BoardPosition(
             previous.center if abs(position.center - previous.center) * panel.width() <= tolerance else position.center,
             previous.top if abs(position.top - previous.top) * panel.height() <= tolerance else position.top,
-            position.confidence)
+            position.confidence, position.width)
         if close(position, previous):
             self.pending_position = None
             self.pending_reads = 0
-            return previous
+            return position
         if self.pending_position is not None and close(position, self.pending_position):
             self.pending_reads += 1
         else:
@@ -243,6 +290,7 @@ class ScoreboardFollow:
         if not visible:
             self.visible = False
             self.position_ready = False
+            self.last_seen_at = None
             self.display_until = 0
             self.drag_origin_cursor = None
             self.recheck = False
@@ -257,6 +305,7 @@ class ScoreboardFollow:
             # hint. Revalidate before displaying or accepting clicks there.
             self.viewport_geometry = QRect(panel.geometry())
             self.position_ready = False
+            self.last_seen_at = None
             self.display_until = 0
             self.pending_position = None
             self.pending_reads = 0
@@ -280,7 +329,9 @@ class ScoreboardFollow:
             changed = panel.set_follow_offset(offset)
             self.last_position = BoardPosition(REFERENCE_CENTER + offset.x(),
                                                REFERENCE_TOP + offset.y(),
-                                               self.last_position.confidence)
+                                               self.last_position.confidence, self.last_position.width)
+            if changed:
+                self.last_seen_at = None
             # No capture, Python image scan, or disk writes in the moving path.
             # Recheck once the pointer settles, also handling native edge clamps.
             if now - self.last_motion < .12:
@@ -294,8 +345,11 @@ class ScoreboardFollow:
             return changed
         self.next_read = now + .25
         try:
+            sampled_at = time.perf_counter()
             frame = self.capture(panel)
-            position = find_scoreboard(frame, self.last_position)
+            allow_occlusion = (self.last_seen_at is not None and self.display_ready
+                               and not dragging and self.pending_position is None)
+            position = find_scoreboard(frame, self.last_position, allow_occlusion=allow_occlusion)
             if position is None and self.last_position is not None:
                 position = find_scoreboard(frame)
         except (OSError, RuntimeError, ValueError):
@@ -316,6 +370,7 @@ class ScoreboardFollow:
             return changed
         self.last_position = position
         self.position_ready = True
+        self.last_seen_at = sampled_at
         self.display_until = now + .6
         dx, dy = position.center - REFERENCE_CENTER, position.top - REFERENCE_TOP
         # Only suppress subpixel noise, so small deliberate drags are retained.

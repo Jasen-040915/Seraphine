@@ -20,7 +20,7 @@ from .voice_keys import KeyboardHook as ThreadKeyboardHook, KeyDecision, VoiceGa
 
 FIELDS = ('enabled', 'ready', 'window', 'phase', 'ticket', 'manual', 'chat_window')
 METHODS = frozenset(('context', 'cancel', 'valid', 'finish', 'transition',
-                     'enter_held', 'reserve_share', 'key', 'reset', 'pointer'))
+                     'enter_held', 'reserve_share', 'mark_share_enter', 'key', 'reset', 'pointer'))
 
 
 def gate_state(gate):

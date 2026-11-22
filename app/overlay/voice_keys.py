@@ -27,6 +27,8 @@ class VoiceGate:
         self.held = set()
         self.blocked = set()
         self.chat_window = 0
+        self.interrupted_share_at = None
+        self.share_submitted = False
 
     def context(self, enabled, ready, window):
         with self.lock:
@@ -41,14 +43,15 @@ class VoiceGate:
     def cancel(self, manual=False, reason=''):
         with self.lock:
             action = 'cancel' if self.phase != 'idle' else ''
+            self.finish(self.ticket, manual)
             self.ticket += 1
-            self.phase, self.manual = 'idle', manual
             return KeyDecision(action=action, ticket=self.ticket, reason=reason)
 
     def reset(self):
         """A finished match cannot leave a remembered native chat behind."""
         with self.lock:
             self.chat_window = 0
+            self.interrupted_share_at = None
             self.held.clear()
             self.blocked.clear()
             return self.cancel(reason='match_reset')
@@ -61,6 +64,12 @@ class VoiceGate:
     def finish(self, ticket, manual=False):
         with self.lock:
             if ticket == self.ticket:
+                if self.phase == 'sharing' and self.chat_window:
+                    if self.share_submitted:
+                        self.chat_window = 0
+                        manual = False
+                    else:
+                        self.interrupted_share_at = time.perf_counter()
                 self.phase, self.manual = 'idle', manual
 
     def transition(self, ticket, old, new):
@@ -74,13 +83,30 @@ class VoiceGate:
         with self.lock:
             return 0x0d in self.held
 
-    def reserve_share(self):
+    def reserve_share(self, board_seen_at=None):
         with self.lock:
-            if not self.window or self.phase != 'idle' or self.chat_window:
+            if not self.window or self.phase != 'idle':
                 return None
+            if self.chat_window:
+                # A newly observed scoreboard can retire our own interrupted
+                # chat. A cached badge or a manually opened chat cannot.
+                if (self.chat_window != self.window or self.interrupted_share_at is None
+                        or board_seen_at is None or board_seen_at <= self.interrupted_share_at):
+                    return None
+            self.chat_window = 0
+            self.interrupted_share_at = None
+            self.share_submitted = False
             self.ticket += 1
             self.phase, self.manual = 'sharing', False
             return self.ticket
+
+    def mark_share_enter(self, ticket, submitted=False):
+        with self.lock:
+            if not self.valid(ticket, 'sharing'):
+                return False
+            self.chat_window = self.window
+            self.share_submitted = submitted
+            return True
 
     def pointer(self, pressed, foreground):
         """A physical click can move the native chat caret; yield ownership.
@@ -89,7 +115,10 @@ class VoiceGate:
         events. Economy sharing keeps its independent click owner.
         """
         with self.lock:
-            if not pressed or self.phase not in ('recording', 'recognizing', 'filling'):
+            if not pressed:
+                return KeyDecision()
+            share_open = self.phase == 'sharing' and self.chat_window and not self.share_submitted
+            if not share_open and self.phase not in ('recording', 'recognizing', 'filling'):
                 return KeyDecision()
             return self.cancel(manual=bool(self.chat_window), reason='pointer_edit' if foreground == self.window else 'focus_changed')
 
@@ -108,8 +137,16 @@ class VoiceGate:
                 return self.cancel(reason='focus_changed') if self.phase != 'idle' else KeyDecision()
             if vk == 0x1b:
                 self.chat_window = 0
+                self.interrupted_share_at = None
                 self.manual = False
                 return self.cancel(reason='escape')
+            if vk == 0x0d and not repeated and self.interrupted_share_at is not None:
+                # After a mouse dismissal this Enter may be opening a new
+                # draft. Let the user own it until they submit or press Esc.
+                self.interrupted_share_at = None
+                self.chat_window = self.window
+                self.manual = True
+                return KeyDecision()
             if self.phase == 'sharing' and vk == 0x0d:
                 # Never let a physical Enter send a partly filled share.
                 self.blocked.add(vk)
@@ -430,13 +467,13 @@ class EconomyMessageSequence:
     action rechecks focus and ownership. Cancellation releases our held keys.
     """
     def __init__(self, bridge, window, text, valid, tab_down, post, done, opened,
-                 clock=None):
+                 clock=None, *, submitted=None):
         import time
         self.bridge, self.window, self.text = bridge, window, text
         self.valid, self.tab_down, self.post = valid, tab_down, post
-        self.done, self.opened = done, opened
+        self.done, self.opened, self.submitted = done, opened, submitted
         self.clock = clock or time.monotonic
-        self.closed, self.chat_opened, self.enter_down = False, False, False
+        self.closed, self.enter_down = False, False
         self.began = self.clock()
         self.elapsed_ms = None
 
@@ -500,9 +537,10 @@ class EconomyMessageSequence:
     def open_chat(self):
         if not self.check():
             return
+        # Register ownership first so a physical click or Esc between the
+        # native key press and the next timer cannot leave a ghost chat.
+        self.opened()
         if self.press_enter():
-            self.chat_opened = True
-            self.opened()
             self.post(50, self.after_open)
 
     def after_open(self):
@@ -523,6 +561,8 @@ class EconomyMessageSequence:
 
     def send(self):
         if self.press_enter():
+            if self.submitted is not None:
+                self.submitted()
             self.post(50, self.sent)
 
     def sent(self):

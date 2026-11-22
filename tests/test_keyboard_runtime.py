@@ -105,6 +105,25 @@ class KeyboardRuntimeTests(unittest.TestCase):
         self.assertFalse(self.gate.valid(old))
         self.assertEqual(self.press()[0].action, 'start')
 
+    def test_interrupted_share_recovery_is_atomic_in_the_input_worker(self):
+        before = time.perf_counter()
+        first = self.gate.reserve_share()
+        self.assertTrue(self.gate.mark_share_enter(first))
+        self.assertEqual(self.gate.pointer(True, 100).action, 'cancel')
+        self.assertIsNone(self.gate.reserve_share(before))
+        self.gate.context(True, True, 101)
+        self.assertIsNone(self.gate.reserve_share(time.perf_counter()))
+        self.gate.context(True, True, 100)
+        retry = self.gate.reserve_share(time.perf_counter())
+        self.assertIsNotNone(retry)
+        self.assertFalse(self.gate.mark_share_enter(first, submitted=True))
+        self.assertEqual(self.gate.chat_window, 0)
+        self.assertTrue(self.gate.mark_share_enter(retry))
+        self.assertTrue(self.gate.mark_share_enter(retry, submitted=True))
+        self.gate.context(True, True, 0)
+        self.gate.context(True, True, 100)
+        self.assertIsNotNone(self.gate.reserve_share())
+
     def test_dead_worker_fails_closed_without_trapping_enter(self):
         self.press()
         self.hook.process.terminate()

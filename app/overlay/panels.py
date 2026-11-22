@@ -354,7 +354,7 @@ class OverlayController(QObject):
                                    and physical == self.click_physical_viewport)
             clickable = (clickable and native_viewport_valid
                          and (not pending_click or same_click_viewport))
-            zones = self.economy.click_zones(physical) if clickable else ()
+            zones = self.economy.click_zones(physical, self.follow.last_seen_at) if clickable else ()
             if clickable:
                 self.click_geometry = QRect(self.economy.geometry())
                 self.click_physical_viewport = QRect(physical) if physical is not None else None
@@ -375,14 +375,14 @@ class OverlayController(QObject):
         if self.closed:
             return
         self.voice.report('economy_clicked', row=zone.row)
-        self.share_economy(zone.row, zone.message)
+        self.share_economy(zone.row, zone.message, zone.board_seen_at)
 
-    def share_economy(self, row, snapshot=None):
+    def share_economy(self, row, snapshot=None, board_seen_at=None):
         if (self.closed or self.preview
                 or not self.settings.get('click_to_chat', True) or not self.live() or not self.keys.foreground()):
             return False
         message = snapshot or economy_message(self.economy.data, row)
-        return self.voice.share_message(message) if message else False
+        return self.voice.share_message(message, board_seen_at=board_seen_at) if message else False
 
     def show_settings(self):
         if self.dialog is None:

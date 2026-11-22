@@ -27,7 +27,7 @@ class EconomyPanel(QWidget):
         self.preview_label = ''
         self.resize(1920, 1080)
 
-    def click_zones(self, native_viewport=None):
+    def click_zones(self, native_viewport=None, board_seen_at=None):
         from .mouse_keys import ClickZone
         if self.preview:
             return ()
@@ -44,7 +44,7 @@ class EconomyPanel(QWidget):
                           round(native_viewport.y() + (y - 9 * scale) * sy),
                           round(native_viewport.x() + (x + 16 * scale) * sx),
                           round(native_viewport.y() + (y + 9 * scale) * sy))
-                zones.append(ClickZone(bounds, row, message))
+                zones.append(ClickZone(bounds, row, message, board_seen_at))
         return tuple(zones)
 
     def set_alignment(self, settings):

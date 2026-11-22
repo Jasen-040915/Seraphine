@@ -1,13 +1,14 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from unittest.mock import Mock, patch
 
 from app.common.qt_runtime import configure_qt_plugins
 configure_qt_plugins()
-from PyQt5.QtCore import Qt, QPoint, QPointF
+from PyQt5.QtCore import Qt, QPoint, QPointF, QEvent
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtTest import QTest
 from app.overlay.model import ScoreboardData, economy_message
@@ -159,12 +160,17 @@ class ShareControllerTests(unittest.TestCase):
         self.keys.down.return_value = True
         self.c = VoiceController(self.profile.name, self.keys, lambda: True, running=False)
         self.c.running = True; self.c.ready = True; self.c.notify = Mock(); self.c.bridge = FakeBridge()
+        self.c.prepare = Mock()  # Economy clicks do not need a speech model.
         self.c.gate.context(True, True, 100)
         self.s = Scheduler()
         self.patch = patch('app.overlay.voice.QTimer.singleShot', side_effect=self.s.post); self.patch.start()
 
     def tearDown(self):
-        self.patch.stop(); self.c.stop(); self.profile.cleanup()
+        self.patch.stop()
+        self.c.stop()
+        self.c.deleteLater()
+        self.app.sendPostedEvents(self.c, QEvent.DeferredDelete)
+        self.profile.cleanup()
 
     def test_voice_disabled_still_shares_and_double_click_does_not_duplicate(self):
         self.c.settings['enabled'] = False
@@ -179,6 +185,57 @@ class ShareControllerTests(unittest.TestCase):
         self.c.gate.key(13, True, 100); self.c.gate.key(13, False, 100)
         self.assertFalse(self.c.share_message('团队装备差：我方领先 700 金币'))
         self.s.advance(2000); self.assertEqual(self.c.bridge.events, [])
+
+    def test_click_outside_after_open_stops_input_and_a_fresh_badge_click_retries(self):
+        self.c.settings['enabled'] = False
+        old_frame = time.perf_counter()
+        self.assertTrue(self.c.share_message('旧消息'))
+        self.s.advance(120)
+        self.c.dispatch(self.c.gate.pointer(True, 100))
+        self.s.advance(300)
+        self.assertEqual(self.c.bridge.events, [('enter', 100)])
+        self.assertFalse(self.c.share_message('旧快照', board_seen_at=old_frame))
+        self.assertFalse(self.c.share_message('无快照'))
+        self.assertTrue(self.c.share_message('新消息', board_seen_at=time.perf_counter()))
+        self.s.advance(300)
+        self.assertEqual(self.c.bridge.events, [
+            ('enter', 100), ('enter', 100), ('text', '新消息'), ('enter', 100)])
+        self.assertFalse(self.c.share_message('双击', board_seen_at=time.perf_counter()))
+        self.assertFalse(self.c.bridge.held or self.c.gate.chat_window)
+
+    def test_focus_loss_after_fill_does_not_send_old_text_or_lock_next_badge(self):
+        self.c.settings['enabled'] = False
+        self.assertTrue(self.c.share_message('旧消息'))
+        self.s.advance(150)
+        self.keys.foreground.return_value = self.c.bridge.focused = False
+        self.c.tick()
+        self.s.advance(350)
+        self.assertEqual(self.c.bridge.events, [('enter', 100), ('text', '旧消息')])
+        self.keys.foreground.return_value = self.c.bridge.focused = True
+        self.assertTrue(self.c.share_message('新消息', board_seen_at=time.perf_counter()))
+        self.s.advance(300)
+        self.assertEqual(self.c.bridge.events[2:], [('enter', 100), ('text', '新消息'), ('enter', 100)])
+
+    def test_manual_enter_after_interruption_protects_user_chat_from_new_badge(self):
+        self.c.settings['enabled'] = False
+        self.assertTrue(self.c.share_message('旧消息'))
+        self.s.advance(120)
+        self.c.dispatch(self.c.gate.pointer(True, 100))
+        for key in (13, 0x41):
+            self.c.gate.key(key, True, 100)
+            self.c.gate.key(key, False, 100)
+        self.assertFalse(self.c.share_message('新消息', board_seen_at=time.perf_counter()))
+        self.s.advance(300)
+        self.assertEqual(self.c.bridge.events, [('enter', 100)])
+
+    def test_click_after_final_enter_has_no_effect_on_committed_send(self):
+        self.c.settings['enabled'] = False
+        self.assertTrue(self.c.share_message('已发送'))
+        self.s.advance(200)
+        self.assertFalse(self.c.gate.pointer(True, 100).action)
+        self.s.advance(200)
+        self.assertEqual(self.c.bridge.events, [('enter', 100), ('text', '已发送'), ('enter', 100)])
+        self.assertFalse(self.c.gate.chat_window or self.c.bridge.held)
 
     def test_finished_match_does_not_leave_economy_share_permanently_busy(self):
         self.c.gate.key(13, True, 100)
@@ -303,7 +360,7 @@ class DifferenceTargetsTests(unittest.TestCase):
                 c.economy.data = DATA; c.live = lambda: True
                 c.keys.foreground = lambda: True; c.voice.share_message = Mock(return_value=True)
                 self.assertTrue(c.share_economy(0))
-                c.voice.share_message.assert_called_once_with(economy_message(DATA, 0))
+                c.voice.share_message.assert_called_once_with(economy_message(DATA, 0), board_seen_at=None)
                 c.voice.share_message.reset_mock()
                 c.preview = True; self.assertFalse(c.share_economy(0))
                 c.preview = False; c.settings['click_to_chat'] = False

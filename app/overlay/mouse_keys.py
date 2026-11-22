@@ -12,6 +12,7 @@ class ClickZone:
     bounds: tuple
     row: int
     message: str
+    board_seen_at: float | None = None
 
     def contains(self, point):
         x, y = point

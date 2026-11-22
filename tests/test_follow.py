@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from app.common.qt_runtime import configure_qt_plugins
 configure_qt_plugins()
-from PyQt5.QtCore import Qt, QRect, QRectF, QPointF, QPoint
+from PyQt5.QtCore import Qt, QRect, QRectF, QPointF, QPoint, QEvent
 from PyQt5.QtGui import QImage, QPainter, QColor, QPen
 from PyQt5.QtWidgets import QApplication
 from app.overlay.follow import find_scoreboard, BoardPosition, ScoreboardFollow, REFERENCE_TOP
@@ -34,6 +34,19 @@ def board_frame(width=1920, height=1080, dx=0, dy=0, sides=True, extra=None, wid
         p.drawLine(QPointF(center + height * .12, top), QPointF(right - inset, top))
     p.end()
     return frame
+
+
+def hover_tooltip(frame, position, side):
+    result = frame.copy()
+    h = frame.height()
+    center, top = frame.width() * position.center, h * position.top
+    x1, x2 = sorted((center + side * h * .09, center + side * h * .61))
+    painter = QPainter(result)
+    painter.setPen(QPen(QColor('#756746'), 2))
+    painter.setBrush(QColor('#0b171b'))
+    painter.drawRect(QRectF(x1, top - h * .035, x2 - x1, h * .20))
+    painter.end()
+    return result
 
 
 class Keys:
@@ -75,10 +88,47 @@ class ScoreboardFollowTests(unittest.TestCase):
         blank.fill(QColor('#071b22'))
         self.assertIsNone(find_scoreboard(blank))
 
+    def test_occluded_frame_requires_current_header_and_both_measured_sides(self):
+        for width, height, scale in ((1280, 720, .92), (1920, 1080, 1.08), (2560, 1600, 1)):
+            frame = board_frame(width, height, dx=-.07, dy=.08, width_scale=scale)
+            anchor = find_scoreboard(frame)
+            for side in (-1, 1):
+                with self.subTest(size=(width, height), side=side):
+                    covered = hover_tooltip(frame, anchor, side)
+                    self.assertIsNone(find_scoreboard(covered, anchor))
+                    self.assertEqual(find_scoreboard(covered, anchor, allow_occlusion=True), anchor)
+                    # With the opposite upright gone too, a gold header stub
+                    # and a dark tooltip at the old location prove too little.
+                    other_edge = width * (anchor.center - side * anchor.width / 2)
+                    p = QPainter(covered)
+                    p.fillRect(QRectF(other_edge - height * .03, height * anchor.top,
+                                      height * .06, height * .45), QColor('#253640'))
+                    p.end()
+                    self.assertIsNone(find_scoreboard(covered, anchor, allow_occlusion=True))
+
+    def test_tooltip_edge_and_real_edge_cannot_move_the_confirmed_badges(self):
+        width, height = 1920, 1080
+        clean = board_frame(width, height)
+        anchor = find_scoreboard(clean)
+        # A gold tooltip edge continues the header on the left while the
+        # lower sides remain at their original locations.
+        wider = board_frame(width, height, dx=-.08 * .5375 * height / width, width_scale=1.08)
+        covered = clean.copy()
+        painter = QPainter(covered)
+        upper_left = QRectF(0, 0, width / 2, height * (REFERENCE_TOP + .17))
+        painter.drawImage(upper_left, wider, upper_left)
+        painter.end()
+        false_frame = find_scoreboard(covered, anchor)
+        self.assertIsNotNone(false_frame)
+        self.assertLess(false_frame.center, anchor.center - .01)
+        self.assertEqual(find_scoreboard(covered, anchor, allow_occlusion=True), anchor)
+        self.assertEqual(find_scoreboard(wider, anchor, allow_occlusion=True), find_scoreboard(wider))
+
     def test_header_separator_cannot_replace_an_obscured_top_border(self):
         for width, height in [(1280, 720), (1920, 1080), (2560, 1600)]:
             with self.subTest(size=(width, height)):
                 frame = board_frame(width, height)
+                original = find_scoreboard(frame)
                 p = QPainter(frame)
                 top = height * REFERENCE_TOP
                 p.fillRect(QRectF(0, top - height * .008, width, height * .016), QColor('#071b22'))
@@ -88,6 +138,7 @@ class ScoreboardFollowTests(unittest.TestCase):
                            QPointF(width / 2 + height * .5375, y))
                 p.end()
                 self.assertIsNone(find_scoreboard(frame))
+                self.assertIsNone(find_scoreboard(frame, original, allow_occlusion=True))
 
     def test_background_gold_near_top_corner_does_not_shift_center(self):
         clean = board_frame()
@@ -263,6 +314,8 @@ class ScoreboardFollowTests(unittest.TestCase):
         frame = board_frame(3840, 1080, dx=-.25,
                             extra=[(3840 * .75, 1080 * REFERENCE_TOP)])
         self.assertIsNone(find_scoreboard(frame))
+        old = find_scoreboard(board_frame(3840, 1080, dx=-.25))
+        self.assertIsNone(find_scoreboard(frame, old, allow_occlusion=True))
 
     def test_first_tab_waits_for_a_native_frame_before_display_or_clicks(self):
         with tempfile.TemporaryDirectory() as profile:
@@ -287,6 +340,59 @@ class ScoreboardFollowTests(unittest.TestCase):
                 self.assertEqual(c.economy.alignment, alignment)
             finally:
                 c.stop()
+
+    def test_hovering_a_difference_keeps_it_visible_and_clickable_until_tab_release(self):
+        with tempfile.TemporaryDirectory() as profile:
+            c = OverlayController(profile=profile, start_reader=False)
+            c.timer.stop()
+            keys = Keys()
+            keys.last_window, keys.held = 123, {9}
+            c.keys = keys
+            c.economy.pass_through = lambda *_: None
+            clean = board_frame(1280, 720, dx=.04, width_scale=.92)
+            anchor = find_scoreboard(clean)
+            covered = hover_tooltip(clean, anchor, 1)
+            frame = clean
+            c.follow.capture = lambda _: frame
+            try:
+                with patch('time.monotonic', return_value=100) as clock:
+                    c.receive(demo_payload())
+                    c.tick()
+                    original = next(z for z in c.click_gate.zones if z.row == 0)
+                    left, top, right, bottom = original.bounds
+                    point = (left + right) // 2, (top + bottom) // 2
+                    keys.point = QPoint(*point)
+                    frame = covered
+                    for delay in (.3, .9, 1.5, 3, 5):
+                        clock.return_value = 100 + delay
+                        c.receive(demo_payload())
+                        c.tick()
+                        self.assertTrue(c.economy.isVisible())
+                        current = next(z for z in c.click_gate.zones if z.row == 0)
+                        self.assertEqual(current.bounds, original.bounds)
+                        self.assertGreater(current.board_seen_at, original.board_seen_at)
+                    self.assertEqual(c.click_gate.mouse('down', point, 123, True), (True, None))
+                    self.assertEqual(c.click_gate.mouse('up', point, 123, True), (True, current))
+                    keys.point = QPoint(45, 35)
+                    frame = clean
+                    clock.return_value += .3
+                    c.tick()
+                    self.assertTrue(c.economy.isVisible())
+                    keys.held = set()
+                    c.tick()
+                    self.assertFalse(c.economy.isVisible())
+                    self.assertFalse(c.click_gate.zones)
+                    keys.held = {9}
+                    frame = covered
+                    c.tick()
+                    self.assertFalse(c.economy.isVisible())
+                    self.assertFalse(c.click_gate.zones)
+            finally:
+                c.stop()
+                c.economy.deleteLater()
+                self.app.sendPostedEvents(c.economy, QEvent.DeferredDelete)
+                c.deleteLater()
+                self.app.sendPostedEvents(c, QEvent.DeferredDelete)
 
     def test_tab_reopen_does_not_draw_or_click_the_previous_location(self):
         with tempfile.TemporaryDirectory() as profile:
@@ -313,6 +419,59 @@ class ScoreboardFollowTests(unittest.TestCase):
                 self.assertAlmostEqual(c.economy.follow_offset.y(), -.12, delta=.005)
             finally:
                 c.stop()
+
+    def test_reopened_native_scoreboard_click_retries_an_interrupted_team_share_as_a_row(self):
+        from test_voice import FakeBridge, Scheduler
+
+        with tempfile.TemporaryDirectory() as profile:
+            c = OverlayController(profile=profile, start_reader=False)
+            c.timer.stop()
+            keys = Keys()
+            keys.last_window = 100
+            keys.held = {9}
+            c.keys = c.voice.keys = keys
+            c.voice.running = True
+            c.voice.settings['enabled'] = False
+            c.voice.bridge = FakeBridge()
+            frame = board_frame(1280, 720)
+            c.follow.capture = lambda _: frame
+            c.economy.pass_through = lambda *_: None
+            scheduler = Scheduler()
+
+            def click(row):
+                zone = next(z for z in c.click_gate.zones if z.row == row)
+                left, top, right, bottom = zone.bounds
+                point = ((left + right) // 2, (top + bottom) // 2)
+                c.click_gate.mouse('down', point, 100, True)
+                _, selected = c.click_gate.mouse('up', point, 100, True)
+                c.share_clicked(selected)
+                return selected
+
+            try:
+                with patch('time.monotonic', side_effect=lambda: 100 + scheduler.now / 1000), \
+                        patch('app.overlay.voice.QTimer.singleShot', side_effect=scheduler.post):
+                    c.receive(demo_payload())
+                    c.tick()
+                    team = click(-1)
+                    scheduler.advance(120)
+                    c.voice.dispatch(c.voice.gate.pointer(True, 100))
+                    keys.held = set()
+                    c.tick()
+                    scheduler.advance(200)
+                    self.assertEqual(c.voice.bridge.events, [('enter', 100)])
+                    keys.held = {9}
+                    c.tick()
+                    row = click(0)
+                    self.assertGreater(row.board_seen_at, team.board_seen_at)
+                    scheduler.advance(300)
+                    self.assertEqual(c.voice.bridge.events[1:],
+                                     [('enter', 100), ('text', row.message), ('enter', 100)])
+            finally:
+                c.stop()
+                c.economy.deleteLater()
+                self.app.sendPostedEvents(c.economy, QEvent.DeferredDelete)
+                c.deleteLater()
+                self.app.sendPostedEvents(c, QEvent.DeferredDelete)
 
     def test_viewport_change_hides_old_badges_until_revalidated(self):
         with tempfile.TemporaryDirectory() as profile:

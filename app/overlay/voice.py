@@ -75,8 +75,9 @@ class VoiceController(QObject):
                   'pid': os.getpid(), 'phase': self.gate.phase, 'hook_error': self.hook.error,
                   'keyboard_pid': self.hook.worker_pid, 'keyboard_actions': self.hook.events_received,
                   'chat_open': bool(self.gate.chat_window), 'timings': dict(self.timings), **details}
-        self.history.append(dict(report))
-        self.history = self.history[-12:]
+        if event != 'heartbeat':
+            self.history.append(dict(report))
+            self.history = self.history[-12:]
         report['recent'] = self.history
         try:
             self.profile.mkdir(parents=True, exist_ok=True)
@@ -354,7 +355,7 @@ class VoiceController(QObject):
         self.last_share = -10
         self.report('match_reset')
 
-    def share_message(self, text):
+    def share_message(self, text, *, board_seen_at=None):
         if (self.closed or not self.running
                 or not text or not self.live() or not self.keys.foreground()):
             self.report('economy_share_rejected', reason='not_active')
@@ -363,29 +364,31 @@ class VoiceController(QObject):
         if self.hook.error or not self.bridge.foreground(self.gate.window):
             self.report('economy_share_rejected', reason='focus_or_keyboard')
             return False
-        if time.monotonic() - self.last_share < 1.5:
+        clicked_at = time.monotonic()
+        if self.gate.phase == 'sharing' or clicked_at - self.last_share < 1.5:
             self.report('economy_share_rejected', reason='cooldown')
             return False
-        ticket = self.gate.reserve_share()
+        ticket = self.gate.reserve_share(board_seen_at)
         if ticket is None:
             self.report('economy_share_rejected', reason='chat_busy')
             self.notify('请先发送或关闭当前聊天，再点击装备差', 3)
             return False
-        self.last_share = time.monotonic()
         self.cancel_delivery()
         window = self.gate.window
         self.notify('正在发送装备差；Esc 取消')
         self.report('economy_share_queued', characters=len(text))
 
         def opened():
-            self.gate.chat_window = window
-            self.report('economy_chat_open_requested')
+            if self.gate.mark_share_enter(ticket):
+                self.report('economy_chat_open_requested')
+
+        def submitted():
+            self.last_share = clicked_at
+            self.gate.mark_share_enter(ticket, submitted=True)
 
         def completed(ok, reason):
             if not self.gate.valid(ticket, 'sharing'):
                 return
-            if ok:
-                self.gate.chat_window = 0
             self.gate.finish(ticket, manual=bool(self.gate.chat_window))
             self.report('economy_share_dispatched' if ok else 'economy_share_cancelled', reason=reason,
                         click_to_dispatch_ms=getattr(self.delivery, 'elapsed_ms', None))
@@ -393,7 +396,7 @@ class VoiceController(QObject):
 
         self.delivery = EconomyMessageSequence(self.bridge, window, text,
             lambda: not self.closed and self.gate.valid(ticket, 'sharing') and self.live(),
-            lambda: self.keys.down(0x09), QTimer.singleShot, completed, opened)
+            lambda: self.keys.down(0x09), QTimer.singleShot, completed, opened, submitted=submitted)
         self.delivery.start()
         return True
 

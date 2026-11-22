@@ -732,13 +732,15 @@ class VoiceControllerTests(unittest.TestCase):
         ticket = self.toggle(); self.toggle()
         self.c.recognized(ticket, '不应写入诊断的句子', '')
         self.scheduler.advance(1000)
-        self.c.report('heartbeat')
+        for _ in range(15):
+            self.c.report('heartbeat')
         import json
         status = json.loads((self.c.profile / 'voice-status.json').read_text(encoding='utf-8'))
         self.assertEqual(self.c.gate.phase, 'editing')
         self.assertGreaterEqual(status['timings']['start_to_first_text_ms'], 0)
         self.assertGreaterEqual(status['timings']['stop_to_final_ms'], 0)
         self.assertGreaterEqual(status['timings']['stop_to_editable_ms'], 0)
+        self.assertIn('input_sequence_finished', [e['event'] for e in status['recent']])
         self.assertNotIn('不应写入诊断的句子', str(status))
 
     def test_pause_prepares_one_ending_snapshot_before_slow_ongoing_interval(self):
