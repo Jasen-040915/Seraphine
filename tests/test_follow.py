@@ -97,6 +97,10 @@ class ScoreboardFollowTests(unittest.TestCase):
                     covered = hover_tooltip(frame, anchor, side)
                     self.assertIsNone(find_scoreboard(covered, anchor))
                     self.assertEqual(find_scoreboard(covered, anchor, allow_occlusion=True), anchor)
+                    first_seen = find_scoreboard(covered, allow_occlusion=True)
+                    self.assertIsNotNone(first_seen)
+                    self.assertAlmostEqual(first_seen.center, anchor.center, delta=1 / width)
+                    self.assertAlmostEqual(first_seen.top, anchor.top, delta=1 / 400)
                     # With the opposite upright gone too, a gold header stub
                     # and a dark tooltip at the old location prove too little.
                     other_edge = width * (anchor.center - side * anchor.width / 2)
@@ -105,6 +109,7 @@ class ScoreboardFollowTests(unittest.TestCase):
                                       height * .06, height * .45), QColor('#253640'))
                     p.end()
                     self.assertIsNone(find_scoreboard(covered, anchor, allow_occlusion=True))
+                    self.assertIsNone(find_scoreboard(covered, allow_occlusion=True))
 
     def test_tooltip_edge_and_real_edge_cannot_move_the_confirmed_badges(self):
         width, height = 1920, 1080
@@ -139,6 +144,7 @@ class ScoreboardFollowTests(unittest.TestCase):
                 p.end()
                 self.assertIsNone(find_scoreboard(frame))
                 self.assertIsNone(find_scoreboard(frame, original, allow_occlusion=True))
+                self.assertIsNone(find_scoreboard(frame, allow_occlusion=True))
 
     def test_background_gold_near_top_corner_does_not_shift_center(self):
         clean = board_frame()
@@ -317,6 +323,46 @@ class ScoreboardFollowTests(unittest.TestCase):
         old = find_scoreboard(board_frame(3840, 1080, dx=-.25))
         self.assertIsNone(find_scoreboard(frame, old, allow_occlusion=True))
 
+    def test_lower_hud_header_does_not_hide_the_board_on_first_tab(self):
+        w, h = 2560, 1600
+        expected = find_scoreboard(board_frame(w, h, dx=.026, dy=.061))
+        # The live HUD can produce another header candidate near the bottom,
+        # without space for the two uprights alongside the player rows.
+        frame = board_frame(w, h, dx=.026, dy=.061, extra=[(w * .66, h * .80)])
+        for hint in (None, expected):
+            found = find_scoreboard(frame, hint, allow_occlusion=True)
+            self.assertIsNotNone(found)
+            self.assertEqual((found.center, found.top), (expected.center, expected.top))
+
+    def test_short_tab_can_acquire_the_board_after_its_opening_frame(self):
+        with tempfile.TemporaryDirectory() as profile:
+            c = OverlayController(profile=profile, start_reader=False)
+            c.timer.stop()
+            keys = Keys()
+            keys.held, keys.last_window = {9}, 123
+            c.keys = keys
+            c.economy.pass_through = lambda *_: None
+            clean = board_frame(1280, 720, dx=.06)
+            frame = QImage()
+            c.follow.capture = lambda _: frame
+            try:
+                with patch('time.monotonic', return_value=100) as clock:
+                    c.receive(demo_payload())
+                    c.tick()
+                    self.assertFalse(c.economy.isVisible())
+                    self.assertFalse(c.click_gate.zones)
+                    frame = hover_tooltip(clean, find_scoreboard(clean), -1)
+                    clock.return_value += .08
+                    c.tick()
+                    self.assertTrue(c.economy.isVisible())
+                    self.assertEqual(len(c.click_gate.zones), 6)
+                    keys.held = set()
+                    c.tick()
+                    self.assertFalse(c.economy.isVisible())
+                    self.assertFalse(c.click_gate.zones)
+            finally:
+                c.stop()
+
     def test_first_tab_waits_for_a_native_frame_before_display_or_clicks(self):
         with tempfile.TemporaryDirectory() as profile:
             c = OverlayController(profile=profile, start_reader=False); c.timer.stop()
@@ -385,8 +431,9 @@ class ScoreboardFollowTests(unittest.TestCase):
                     keys.held = {9}
                     frame = covered
                     c.tick()
-                    self.assertFalse(c.economy.isVisible())
-                    self.assertFalse(c.click_gate.zones)
+                    self.assertTrue(c.economy.isVisible())
+                    self.assertEqual(next(z for z in c.click_gate.zones if z.row == 0).bounds,
+                                     original.bounds)
             finally:
                 c.stop()
                 c.economy.deleteLater()
@@ -417,6 +464,16 @@ class ScoreboardFollowTests(unittest.TestCase):
                     self.assertEqual(bool(c.click_gate.zones), reading == 2)
                 self.assertAlmostEqual(c.economy.follow_offset.x(), -.08, delta=.005)
                 self.assertAlmostEqual(c.economy.follow_offset.y(), -.12, delta=.005)
+                keys.held = set(); c.tick()
+                moved = board_frame(1280, 720, dx=.05, dy=.06)
+                frames[0] = hover_tooltip(moved, find_scoreboard(moved), 1)
+                keys.held = {9}
+                for reading in range(3):
+                    c.follow.next_read = 0; c.tick()
+                    self.assertEqual(c.economy.isVisible(), reading == 2)
+                    self.assertEqual(bool(c.click_gate.zones), reading == 2)
+                self.assertAlmostEqual(c.economy.follow_offset.x(), .05, delta=.005)
+                self.assertAlmostEqual(c.economy.follow_offset.y(), .06, delta=.005)
             finally:
                 c.stop()
 

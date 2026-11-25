@@ -38,7 +38,7 @@ def _border_peaks(scores):
     return peaks
 
 
-def _visible_around_tooltip(gold, dark, sides, anchor, candidates):
+def _visible_around_tooltip(gold, dark, sides, anchor, candidates, *, require_corner=False):
     """Reconfirm a measured frame using its exposed header and upright borders."""
     height, width = gold.shape
     middle = anchor.center * width - .5
@@ -66,6 +66,10 @@ def _visible_around_tooltip(gold, dark, sides, anchor, candidates):
                  for start in (.02, .14, .28))
         if not any(border[begin:end:2].mean() >= .75 for begin, end in bands if end <= height):
             return False
+        if require_corner and border[y + round(height * .018):y + round(height * .045):2].mean() < .75:
+            # On first acquisition a tooltip's own header may cross a true
+            # edge well above its top. Require one visibly joined corner.
+            continue
         xs = edge + inward * np.arange(round(height * .025), round(height * .23), 2)
         # At least one long gold header segment must have the native dark
         # fill immediately beneath it. A row divider has an upright above it.
@@ -78,6 +82,56 @@ def _visible_around_tooltip(gold, dark, sides, anchor, candidates):
                 header_visible = True
                 break
     return header_visible
+
+
+def _row_edges(sides, dark, y):
+    """Measure uprights alongside the lower player rows, below most tooltips."""
+    height, width = sides.shape
+    start, end = y + round(height * .22), y + round(height * .38)
+    if end > height:
+        return (), ()
+    border, fill = sides[start:end:2], dark[start:end:2]
+    left, right = np.zeros(width), np.zeros(width)
+    left[:-2] = (border[:, :-2] & fill[:, 2:]).mean(axis=0)
+    right[2:] = (border[:, 2:] & fill[:, :-2]).mean(axis=0)
+    return _border_peaks(left), _border_peaks(right)
+
+
+def _covered_candidates(gold, dark, sides, min_width, max_width):
+    """Locate a partly covered board on the first Tab, with no saved position."""
+    height, width = gold.shape
+    last = height - round(height * .38)
+    below = max(2, round(height * .008))
+    # Look for one long exposed gold header segment with dark fill underneath.
+    strip = gold[:last, ::4] & dark[below:last + below, ::4]
+    span = max(2, round(height * .20 / 4))
+    sums = np.zeros((last, strip.shape[1] + 1), dtype=np.int32)
+    np.cumsum(strip, axis=1, out=sums[:, 1:])
+    rows = np.flatnonzero((sums[:, span:] - sums[:, :-span] >= .8 * span).any(axis=1))
+    candidates = []
+    for y in rows.tolist():
+        lefts, rights = _row_edges(sides, dark, y)
+        for left, ls in lefts:
+            for right, rs in rights:
+                if min_width <= right - left <= max_width:
+                    score = min(ls, rs)
+                    anchor = BoardPosition((left + right + 1) / (2 * width),
+                                           (y + .5) / height, score, (right - left) / width)
+                    if _visible_around_tooltip(gold, dark, sides, anchor, (), require_corner=True):
+                        candidates.append((score, left, right, y))
+    return candidates
+
+
+def _single_frame(candidates):
+    if not candidates:
+        return None
+    best = candidates[0]
+    same = [c for c in candidates if abs(c[1] - best[1]) <= 5 and abs(c[2] - best[2]) <= 5
+            and abs(c[3] - best[3]) <= 5]
+    if any(c[0] >= best[0] - .08 and c not in same for c in candidates):
+        return None
+    # Use the outermost of the parallel header lines as a stable anchor.
+    return min(same, key=lambda c: c[3])
 
 
 def find_scoreboard(frame, hint=None, *, allow_occlusion=False):
@@ -150,17 +204,26 @@ def find_scoreboard(frame, hint=None, *, allow_occlusion=False):
     if (allow_occlusion and hint is not None
             and _visible_around_tooltip(gold_mask, dark_mask, side_mask, hint, candidates)):
         return hint
-    if not candidates:
+    if not candidates and allow_occlusion and hint is None:
+        candidates = sorted(_covered_candidates(gold_mask, dark_mask, side_mask, min_width, max_width),
+                            reverse=True)
+    edge = _single_frame(candidates)
+    if edge is None and candidates:
+        # A HUD panel near the bottom can have an equally strong header.
+        # Only break a tie when the player rows confirm both sides of one frame.
+        supported = []
+        for candidate in candidates:
+            score, left, right, y = candidate
+            if score < candidates[0][0] - .08:
+                break
+            lefts, rights = _row_edges(side_mask, dark_mask, y)
+            if any(abs(x - left) <= 3 for x, _ in lefts) and any(abs(x - right) <= 3 for x, _ in rights):
+                supported.append(candidate)
+        edge = _single_frame(supported)
+    if edge is None:
         return None
-    best = candidates[0]
-    same_frame = [c for c in candidates if abs(c[1] - best[1]) <= 5 and abs(c[2] - best[2]) <= 5
-                  and abs(c[3] - best[3]) <= 5]
-    if any(c[0] >= best[0] - .08 and c not in same_frame for c in candidates):
-        return None
-    # The outermost of the parallel frame lines is a stable anchor.
-    edge = min(same_frame, key=lambda c: c[3])
     return BoardPosition((edge[1] + edge[2] + 1) / (2 * width),
-                         (edge[3] + .5) / height, round(best[0], 3), (edge[2] - edge[1]) / width)
+                         (edge[3] + .5) / height, round(edge[0], 3), (edge[2] - edge[1]) / width)
 
 
 def capture_game(panel):
@@ -181,11 +244,13 @@ class ScoreboardFollow:
 
     def reset(self, panel=None):
         self.next_read = 0
+        self.opening_until = 0
         self.visible = False
         self.position_ready = False
         self.last_seen_at = None
         self.display_until = 0
         self.viewport_geometry = None
+        self.measured_geometry = None
         self.last_position = None
         self.pending_position = None
         self.pending_reads = 0
@@ -297,9 +362,11 @@ class ScoreboardFollow:
             self.pending_position = None
             self.pending_reads = 0
             return False
-        if not self.visible:
-            self.visible = True
+        now = time.monotonic()
+        if not self.visible or panel.geometry() != self.viewport_geometry:
+            self.opening_until = now + .30
             self.next_read = 0
+        self.visible = True
         if panel.geometry() != self.viewport_geometry:
             # Normalized coordinates from another viewport are only a search
             # hint. Revalidate before displaying or accepting clicks there.
@@ -311,8 +378,6 @@ class ScoreboardFollow:
             self.pending_reads = 0
             self.frame_dragging = False
             self.drag_origin_cursor = None
-            self.next_read = 0
-        now = time.monotonic()
         changed = False
         tracking = (self.position_ready and dragging and self.frame_dragging and self.drag_cursor is not None
                     and self.drag_origin_cursor is not None)
@@ -347,16 +412,15 @@ class ScoreboardFollow:
         try:
             sampled_at = time.perf_counter()
             frame = self.capture(panel)
-            allow_occlusion = (self.last_seen_at is not None and self.display_ready
-                               and not dragging and self.pending_position is None)
-            position = find_scoreboard(frame, self.last_position, allow_occlusion=allow_occlusion)
+            # After Tab release or a missed scan the old coordinates are only
+            # a hint. Test the header and both sides against this new image.
+            use_hint = self.pending_position is None and self.measured_geometry == self.viewport_geometry
+            position = find_scoreboard(frame, self.last_position,
+                                       allow_occlusion=not dragging and (self.last_position is None or use_hint))
             if position is None and self.last_position is not None:
-                position = find_scoreboard(frame)
+                position = find_scoreboard(frame, allow_occlusion=not dragging)
         except (OSError, RuntimeError, ValueError):
-            self.position_ready = False
-            self.pending_position = None
-            self.pending_reads = 0
-            return changed
+            position = None
         position = self.stable_position(panel, position)
         if position is None:
             # Keep the last anchor for reacquisition without painting old
@@ -364,11 +428,14 @@ class ScoreboardFollow:
             self.position_ready = False
             if self.pending_position is not None:
                 self.display_until = 0
-                # Confirm a possible move promptly, including release/clamp
-                # corrections, without ever painting an unconfirmed location.
+            if self.pending_position is not None or now < self.opening_until:
+                # The first key sample often precedes the game's first drawn frame.
+                # Retry promptly while opening, then return to normal scan cadence.
                 self.next_read = now + .06
             return changed
         self.last_position = position
+        self.measured_geometry = self.viewport_geometry
+        self.opening_until = 0
         self.position_ready = True
         self.last_seen_at = sampled_at
         self.display_until = now + .6
